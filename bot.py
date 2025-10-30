@@ -20,6 +20,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage 
 
+# ❗ НОВІ ІМПОРТИ ДЛЯ ВЕБХУКА
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+
 from aiohttp.client_exceptions import ClientConnectorError
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 
@@ -32,20 +36,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ARCHIVE_CHANNEL_ID = os.getenv("ARCHIVE_CHANNEL_ID") 
-# ❗ Отримуємо посилання на "сейф"
 DATABASE_URL = os.getenv("DATABASE_URL") 
-
 ADMINS = [7996371062] 
 
 ADMIN_TITLES = {
     7996371062: "бізнес-тренерки Олександри",
 }
 
+# ❗ НАЛАШТУВАННЯ ВЕБХУКА (ДЛЯ RENDER)
+BASE_WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
+WEB_SERVER_HOST = "0.0.0.0"
+WEB_SERVER_PORT = int(os.getenv("PORT", 8080)) # Render надає порт у змінній PORT
+
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
+
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage) 
 
-# ❗ Глобальний "сейф" (пул підключень)
 pool: asyncpg.Pool = None
 
 class BroadcastStates(StatesGroup):
@@ -57,7 +66,6 @@ class BroadcastStates(StatesGroup):
 async def init_db():
     """Ініціалізує базу даних PostgreSQL."""
     global pool
-    # 'pool' вже створено в main(), ми його просто використовуємо
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -200,7 +208,8 @@ async def delete_post_by_title(title: str) -> bool:
     async with pool.acquire() as conn:
         try:
             result = await conn.execute("DELETE FROM posts WHERE post_title = $1", title)
-            if 'DELETE 1' in result:
+            # Перевіряємо, чи щось було видалено
+            if result and int(result.split()[-1]) > 0:
                 logging.info(f"Пост '{title}' видалено з бази.")
                 return True
             else:
@@ -510,11 +519,22 @@ async def cmd_start(message: Message):
         
     elif phone:
         keyboard = get_menu_only_keyboard()
-        greeting = f"Привіт, {message.from_user.first_name or 'друже'}! 👋"
+        # ❗ ОНОВЛЕНО: Привітання для тих, хто ВЖЕ в базі (старий юзер)
+        greeting = f"""🌿 Привіт!
+Раді вітати тебе у навчальному боті EVA ХРК 💚
+
+Тут ти знайдеш:
+📚 корисні матеріали для розвитку,
+🗓 актуальні навчальні події,
+🧠 опитування для вдосконалення,
+і найголовніше — підтримку на твоєму шляху в EVA 🌸
+
+Твій номер ({phone}) збережено. Тепер тобі доступне 'Меню' 👇"""
         await message.answer(greeting, reply_markup=keyboard)
     
     else:
         keyboard = get_main_keyboard()
+        # ❗ ОНОВЛЕНО: Привітання для НОВИХ (просимо номер)
         greeting = (
             f"Привіт, {message.from_user.first_name or 'друже'}! 🎉 Ви приєднались до бота.\n"
             "Будь ласка, **натисніть кнопку нижче**, щоб поділитися номером телефону для повної реєстрації."
@@ -1171,7 +1191,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
 🧠 опитування для вдосконалення,
 і найголовніше — підтримку на твоєму шляху в EVA 🌸
 
-Натисни меню нижче, щоб розпочати 👇"""
+Твій номер ({phone}) збережено. Тепер тобі доступне 'Меню' 👇"""
         
         await message.answer(
             greeting,
@@ -1188,12 +1208,14 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
         if target_user_id:
             try:
-                admin_signature = ADMIN_TITLES.get(admin_id, "адміністратора") 
+                # ❗ ОНОВЛЕНО: Отримуємо персоналізований підпис адміна
+                admin_signature = ADMIN_TITLES.get(admin_id, "адміністратора") # Запасний варіант
                 
                 if message.text:
                     safe_admin_text = escape_html(message.text)
                     await bot.send_message(
                         chat_id=target_user_id,
+                        # ❗ ОНОВЛЕНО: Використовуємо підпис
                         text=f"👨‍💻 <b>Відповідь від {admin_signature}:</b>\n\n{safe_admin_text}",
                         parse_mode='HTML'
                     )
@@ -1263,7 +1285,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
         user_id = message.from_user.id
         user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
         
-    
+        global pool
         async with pool.acquire() as conn:
             phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
         
@@ -1302,8 +1324,9 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
 # --- Запуск бота ---
 async def main():
-    global pool  # 🟢 Перенесено сюди, щоб pool був доступний глобально
-
+    # ❗ ВИПРАВЛЕНО: 'global pool' оголошується на початку
+    global pool 
+    
     if not BOT_TOKEN:
         logging.critical("Помилка: Не знайдено BOT_TOKEN. Перевірте файл .env.")
         return
@@ -1318,11 +1341,11 @@ async def main():
         # ❗ Створюємо пул підключень ОДИН РАЗ
         pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
-        await populate_folders_if_empty()  # Заповнення папок при старті
+        await populate_folders_if_empty() # Заповнення папок при старті
         logging.info("Бот запущений ✅")
-
+        
         await dp.start_polling(bot)
-
+        
     except Exception as e:
         logging.critical(f"Критична помилка при запуску або підключенні до БД: {e}")
     finally:
@@ -1331,7 +1354,10 @@ async def main():
             logging.info("Пул підключень до БД закрито.")
 
 
-# --- Запуск з консолі ---
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Бот зупинено вручну (Ctrl+C).")
+    except Exception as e:
+        logging.critical(f"Помилка при запуску бота (asyncio.run): {e}")
