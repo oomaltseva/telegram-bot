@@ -1,7 +1,8 @@
 # bot.py
 import os
 import asyncio
-import sqlite3
+import sqlite3 # Ми його більше не використовуємо, але нехай залишається
+import asyncpg # ❗ ДОДАНО: Драйвер для Neon/PostgreSQL
 import csv
 import io
 import logging 
@@ -31,376 +32,320 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ARCHIVE_CHANNEL_ID = os.getenv("ARCHIVE_CHANNEL_ID") 
+# ❗ Отримуємо посилання на "сейф"
+DATABASE_URL = os.getenv("DATABASE_URL") 
 
 ADMINS = [7996371062] 
 
 ADMIN_TITLES = {
     7996371062: "бізнес-тренерки Олександри",
-    # 123456789: "тренера Галини" 
 }
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage) 
 
-# ❗ ВАЖЛИВА ЗМІНА:
-# Тепер бот шукає шлях до бази в .env, 
-# а якщо не знаходить - використовує локальний файл 'users.db'
-DB_PATH = os.getenv("DB_PATH", "users.db")
+# ❗ Глобальний "сейф" (пул підключень)
+pool: asyncpg.Pool = None
 
 class BroadcastStates(StatesGroup):
     waiting_for_content = State()
     waiting_for_folder = State()
 
-# --- (ВЕСЬ ІНШИЙ КОД ЗАЛИШАЄТЬСЯ БЕЗ ЗМІН) ---
+# --- ❗❗❗ НОВІ ФУНКЦІЇ РОБОТИ З БАЗОЮ (asyncpg) ❗❗❗ ---
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    # Таблиця користувачів
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            phone_number TEXT
-        )
-    """)
-    # Таблиця Папок
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS folders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL
-        )
-    """)
-    # Таблиця Постів
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            folder_id INTEGER NOT NULL,
-            post_title TEXT NOT NULL,       
-            message_id INTEGER NOT NULL,    
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (folder_id) REFERENCES folders(id)
-        )
-    """)
+async def init_db():
+    """Ініціалізує базу даних PostgreSQL."""
+    global pool
+    # Створюємо підключення
+    pool = await asyncpg.create_pool(DATABASE_URL)
     
-    # Таблиця Тікетів підтримки
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS support_tickets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            user_name TEXT,
-            message_text TEXT,
-            status TEXT DEFAULT 'open', 
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            closed_at TIMESTAMP,
-            closed_by_admin_id INTEGER
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
-    logging.info(f"База даних ініціалізована. Шлях: {DB_PATH}")
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                phone_number TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS folders (
+                id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS posts (
+                id SERIAL PRIMARY KEY,
+                folder_id INTEGER NOT NULL,
+                post_title TEXT NOT NULL,       
+                message_id BIGINT NOT NULL,    
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                user_name TEXT,
+                message_text TEXT,
+                status TEXT DEFAULT 'open',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                closed_at TIMESTAMP,
+                closed_by_admin_id BIGINT
+            )
+        """)
+    logging.info("База даних PostgreSQL ініціалізована.")
 
-def populate_folders_if_empty():
+async def populate_folders_if_empty():
+    """Заповнює папки за замовчуванням, якщо вони порожні."""
+    global pool
     folders_to_add = [
         "📘 Корисності",
         "🎓 Іспит Школи Новачка",
         "🎥 Відеоогляди",
         "🎧 Подкасти з психологами"
     ]
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM folders")
-    count = cursor.fetchone()[0]
-    if count == 0:
-        logging.info("База 'folders' порожня. Заповнюємо...")
-        for folder_name in folders_to_add:
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM folders")
+        if count == 0:
+            logging.info("База 'folders' порожня. Заповнюємо...")
             try:
-                cursor.execute("INSERT INTO folders (name) VALUES (?)", (folder_name,))
-            except sqlite3.IntegrityError:
-                logging.warning(f"Папка '{folder_name}' вже існує.")
-        conn.commit()
-        logging.info("Папки за замовчуванням додано.")
-    conn.close()
-
-def log_support_ticket(user_id: int, user_name: str, text: str):
+                # Використовуємо $1, $2... замість ?
+                await conn.executemany("INSERT INTO folders (name) VALUES ($1)",
+                                       [(name,) for name in folders_to_add])
+                logging.info("Папки за замовчуванням додано.")
+            except asyncpg.exceptions.UniqueViolationError:
+                logging.warning("Помилка: Папка вже існує (це дивно, але ігноруємо).")
+        
+async def log_support_ticket(user_id: int, user_name: str, text: str):
+    global pool
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO support_tickets (user_id, user_name, message_text) VALUES (?, ?, ?)",
-            (user_id, user_name, text)
-        )
-        conn.commit()
-        conn.close()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO support_tickets (user_id, user_name, message_text) VALUES ($1, $2, $3)",
+                user_id, user_name, text
+            )
         logging.info(f"Створено новий тікет (ID: {user_id}) зі статусом 'open'.")
     except Exception as e:
         logging.error(f"Помилка створення тікету: {e}")
 
-def close_support_ticket(user_id: int, admin_id: int):
+async def close_support_ticket(user_id: int, admin_id: int):
+    global pool
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id FROM support_tickets WHERE user_id = ? AND status = 'open' ORDER BY created_at DESC LIMIT 1",
-            (user_id,)
-        )
-        ticket = cursor.fetchone()
-        if ticket:
-            ticket_id = ticket[0]
-            cursor.execute(
-                "UPDATE support_tickets SET status = 'closed', closed_at = CURRENT_TIMESTAMP, closed_by_admin_id = ? WHERE id = ?",
-                (admin_id, ticket_id)
+        async with pool.acquire() as conn:
+            ticket_id = await conn.fetchval(
+                "SELECT id FROM support_tickets WHERE user_id = $1 AND status = 'open' ORDER BY created_at DESC LIMIT 1",
+                user_id
             )
-            conn.commit()
-            logging.info(f"Тікет {ticket_id} (від User ID: {user_id}) закрито адміном {admin_id}.")
-        else:
-            logging.warning(f"Адмін {admin_id} відповів {user_id}, але відкритих тікетів для нього не знайдено.")
-        conn.close()
+            if ticket_id:
+                await conn.execute(
+                    "UPDATE support_tickets SET status = 'closed', closed_at = CURRENT_TIMESTAMP, closed_by_admin_id = $1 WHERE id = $2",
+                    admin_id, ticket_id
+                )
+                logging.info(f"Тікет {ticket_id} (від User ID: {user_id}) закрито адміном {admin_id}.")
+            else:
+                logging.warning(f"Адмін {admin_id} відповів {user_id}, але відкритих тікетів для нього не знайдено.")
     except Exception as e:
         logging.error(f"Помилка закриття тікету: {e}")
 
-def get_open_tickets() -> list:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id, user_name, message_text, created_at FROM support_tickets WHERE status = 'open' ORDER BY created_at ASC"
-    )
-    tickets = cursor.fetchall()
-    conn.close()
+async def get_open_tickets() -> list:
+    global pool
+    async with pool.acquire() as conn:
+        tickets = await conn.fetch(
+            "SELECT user_id, user_name, message_text, created_at FROM support_tickets WHERE status = 'open' ORDER BY created_at ASC"
+        )
     return tickets 
 
-def add_new_folder(name: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO folders (name) VALUES (?)", (name,))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False
+async def add_new_folder(name: str) -> bool:
+    global pool
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute("INSERT INTO folders (name) VALUES ($1)", name)
+            return True
+        except asyncpg.exceptions.UniqueViolationError:
+            return False
 
-def delete_folder_by_name(name: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT id FROM folders WHERE name = ?", (name,))
-        folder_data = cursor.fetchone()
-        if not folder_data:
-            conn.close()
-            return False 
-        folder_id = folder_data[0]
-        cursor.execute("DELETE FROM posts WHERE folder_id = ?", (folder_id,))
-        cursor.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
-        conn.commit()
-        conn.close()
-        logging.info(f"Папку ID {folder_id} ({name}) та її пости видалено.")
-        return True 
-    except Exception as e:
-        logging.error(f"Помилка при видаленні папки: {e}")
-        conn.close()
-        return False
+async def delete_folder_by_name(name: str) -> bool:
+    global pool
+    async with pool.acquire() as conn:
+        try:
+            # Використовуємо RETURNING id, щоб отримати ID папки, яку видаляємо
+            folder_id = await conn.fetchval("SELECT id FROM folders WHERE name = $1", name)
+            if not folder_id:
+                return False 
+            
+            # Видаляємо пости (PostgreSQL підтримує ON DELETE CASCADE)
+            await conn.execute("DELETE FROM posts WHERE folder_id = $1", folder_id)
+            await conn.execute("DELETE FROM folders WHERE id = $1", folder_id)
+            logging.info(f"Папку ID {folder_id} ({name}) та її пости видалено.")
+            return True
+        except Exception as e:
+            logging.error(f"Помилка при видаленні папки: {e}")
+            return False
 
-def delete_post_by_id(post_id: int) -> (bool, Optional[int]):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT folder_id FROM posts WHERE id = ?", (post_id,))
-        post_data = cursor.fetchone()
-        if not post_data:
-            conn.close()
-            return False, None 
-        folder_id = post_data[0]
-        cursor.execute("DELETE FROM posts WHERE id = ?", (post_id,))
-        conn.commit()
-        conn.close()
-        logging.info(f"Пост ID {post_id} видалено з бази.")
-        return True, folder_id 
-    except Exception as e:
-        logging.error(f"Помилка при видаленні поста: {e}")
-        conn.close()
-        return False, None
+async def delete_post_by_id(post_id: int) -> (bool, Optional[int]):
+    global pool
+    async with pool.acquire() as conn:
+        try:
+            # Використовуємо RETURNING, щоб отримати folder_id за один запит
+            result = await conn.fetchrow("DELETE FROM posts WHERE id = $1 RETURNING folder_id", post_id)
+            if result:
+                logging.info(f"Пост ID {post_id} видалено з бази.")
+                return True, result['folder_id']
+            else:
+                return False, None
+        except Exception as e:
+            logging.error(f"Помилка при видаленні поста: {e}")
+            return False, None
 
-def delete_post_by_title(title: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT id FROM posts WHERE post_title = ?", (title,))
-        post_data = cursor.fetchone()
-        if not post_data:
-            conn.close()
-            return False 
-        cursor.execute("DELETE FROM posts WHERE post_title = ?", (title,))
-        conn.commit()
-        conn.close()
-        logging.info(f"Пост '{title}' видалено з бази.")
-        return True 
-    except Exception as e:
-        logging.error(f"Помилка при видаленні поста: {e}")
-        conn.close()
-        return False
+async def delete_post_by_title(title: str) -> bool:
+    global pool
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute("DELETE FROM posts WHERE post_title = $1", title)
+            if result == 'DELETE 1':
+                logging.info(f"Пост '{title}' видалено з бази.")
+                return True
+            else:
+                return False
+        except Exception as e:
+            logging.error(f"Помилка при видаленні поста: {e}")
+            return False
 
-def add_user(user_id: int, username: str, full_name: str, phone_number: str = None):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR REPLACE INTO users (user_id, username, full_name, phone_number) VALUES (?, ?, ?, ?)",
-        (user_id, username, full_name, phone_number)
-    )
-    conn.commit()
-    conn.close()
+async def add_user(user_id: int, username: str, full_name: str, phone_number: str = None):
+    global pool
+    async with pool.acquire() as conn:
+        # Використовуємо ON CONFLICT для безпечного оновлення
+        await conn.execute(
+            """
+            INSERT INTO users (user_id, username, full_name, phone_number) 
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username = EXCLUDED.username,
+                full_name = EXCLUDED.full_name,
+                phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number)
+            """,
+            user_id, username, full_name, phone_number
+        )
 
-def get_active_users():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users")
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
+async def get_active_users():
+    global pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM users")
+    return [row['user_id'] for row in rows]
 
-def delete_user(user_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+async def delete_user(user_id: int):
+    global pool
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM users WHERE user_id = $1", user_id)
 
-def delete_user_by_phone(phone_query: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    digits_only = re.sub(r'\D', '', phone_query)
-    search_suffix = digits_only
-    if len(digits_only) > 9:
-        search_suffix = digits_only[-9:]
-    cursor.execute("SELECT user_id FROM users WHERE phone_number LIKE ?", ('%' + search_suffix,))
-    user_to_delete = cursor.fetchone()
-    if user_to_delete:
-        user_id = user_to_delete[0]
-        cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-        conn.commit()
-        conn.close()
-        return True 
-    else:
-        conn.close()
-        return False 
+async def delete_user_by_phone(phone_query: str) -> bool:
+    global pool
+    async with pool.acquire() as conn:
+        digits_only = re.sub(r'\D', '', phone_query)
+        search_suffix = digits_only
+        if len(digits_only) > 9:
+            search_suffix = digits_only[-9:]
+        
+        user_id = await conn.fetchval("SELECT user_id FROM users WHERE phone_number LIKE $1", '%' + search_suffix)
+        
+        if user_id:
+            await conn.execute("DELETE FROM users WHERE user_id = $1", user_id)
+            return True
+        else:
+            return False
 
-def delete_users_by_list(identifiers: list) -> int:
+async def delete_users_by_list(identifiers: list) -> int:
+    global pool
     if not identifiers:
         return 0
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    placeholders = ','.join('?' for _ in identifiers)
-    query = f"""
-    SELECT user_id
-    FROM users
-    WHERE CAST(user_id AS TEXT) IN ({placeholders}) OR phone_number IN ({placeholders})
-    """
-    cursor.execute(query, identifiers + identifiers)
-    results = cursor.fetchall()
-    
-    if not results:
-        conn.close()
-        return 0
+    async with pool.acquire() as conn:
+        try:
+            # Використовуємо ANY($1::TEXT[]) - це синтаксис PostgreSQL
+            result = await conn.fetch(
+                """
+                DELETE FROM users
+                WHERE CAST(user_id AS TEXT) = ANY($1::TEXT[]) OR phone_number = ANY($1::TEXT[])
+                RETURNING user_id
+                """,
+                identifiers
+            )
+            deleted_count = len(result)
+            logging.info(f"Видалено {deleted_count} користувачів за списком.")
+            return deleted_count
+        except Exception as e:
+            logging.error(f"Помилка при масовому видаленні: {e}")
+            return 0
+
+async def get_user_id_by_phone_strict(phone_query: str) -> Optional[int]:
+    global pool
+    async with pool.acquire() as conn:
+        digits_only = re.sub(r'\D', '', phone_query)
+        search_suffix = digits_only
+        if len(digits_only) > 9:
+            search_suffix = digits_only[-9:]
         
-    user_ids_to_delete = list(set([row[0] for row in results]))
-    
-    if not user_ids_to_delete:
-        conn.close()
-        return 0
+        user_to_find = await conn.fetchval("SELECT user_id FROM users WHERE phone_number LIKE $1", '%' + search_suffix)
         
-    try:
-        delete_placeholders = ','.join('?' for _ in user_ids_to_delete)
-        cursor.execute(f"DELETE FROM users WHERE user_id IN ({delete_placeholders})", user_ids_to_delete)
-        deleted_count = cursor.rowcount 
-        conn.commit()
-        conn.close()
-        logging.info(f"Видалено {deleted_count} користувачів за списком.")
-        return deleted_count
-    except Exception as e:
-        logging.error(f"Помилка при масовому видаленні: {e}")
-        conn.close()
-        return 0
+        if user_to_find:
+            return user_to_find 
+        else:
+            return None 
 
-def get_user_id_by_phone_strict(phone_query: str) -> Optional[int]:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    digits_only = re.sub(r'\D', '', phone_query)
-    search_suffix = digits_only
-    if len(digits_only) > 9:
-        search_suffix = digits_only[-9:]
-    cursor.execute("SELECT user_id FROM users WHERE phone_number LIKE ?", ('%' + search_suffix,))
-    user_to_find = cursor.fetchone()
-    conn.close()
-    if user_to_find:
-        return user_to_find[0] 
-    else:
-        return None 
+async def get_users_by_query(query: str):
+    global pool
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id FROM users WHERE full_name LIKE $1 OR username LIKE $1 OR phone_number LIKE $1",
+            '%' + query + '%'
+        )
+    return [row['user_id'] for row in rows]
 
-def get_users_by_query(query: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id FROM users WHERE full_name LIKE ? OR username LIKE ? OR phone_number LIKE ?",
-        ('%' + query + '%', '%' + query + '%', '%' + query + '%')
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    return [row[0] for row in rows]
-
-def get_users_by_list(identifiers: list) -> dict:
+async def get_users_by_list(identifiers: list) -> dict:
+    global pool
     if not identifiers:
         return {}
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    placeholders = ','.join('?' for _ in identifiers)
-    query = f"""
-    SELECT user_id, phone_number, full_name
-    FROM users
-    WHERE CAST(user_id AS TEXT) IN ({placeholders}) OR phone_number IN ({placeholders})
-    """
-    cursor.execute(query, identifiers + identifiers)
-    results = cursor.fetchall()
-    conn.close()
+    async with pool.acquire() as conn:
+        results = await conn.fetch(
+            """
+            SELECT user_id, phone_number, full_name
+            FROM users
+            WHERE CAST(user_id AS TEXT) = ANY($1::TEXT[]) OR phone_number = ANY($1::TEXT[])
+            """,
+            identifiers
+        )
     found_users = {}
-    for uid, phone, name in results:
-        found_users[uid] = {'phone': phone, 'name': name}
+    for row in results:
+        found_users[row['user_id']] = {'phone': row['phone_number'], 'name': row['full_name']}
     return found_users
 
-def save_post(folder_id: int, post_title: str, message_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO posts (folder_id, post_title, message_id) VALUES (?, ?, ?)",
-        (folder_id, post_title, message_id)
-    )
-    conn.commit()
-    conn.close()
+async def save_post(folder_id: int, post_title: str, message_id: int):
+    global pool
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO posts (folder_id, post_title, message_id) VALUES ($1, $2, $3)",
+            folder_id, post_title, message_id
+        )
     logging.info(f"Пост (MsgID: {message_id}) збережено у папку ID {folder_id}.")
 
-def get_all_posts_by_folder(folder_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, post_title, message_id FROM posts WHERE folder_id = ? ORDER BY created_at DESC",
-        (folder_id,)
-    )
-    posts = cursor.fetchall()
-    conn.close()
+async def get_all_posts_by_folder(folder_id: int):
+    global pool
+    async with pool.acquire() as conn:
+        posts = await conn.fetch(
+            "SELECT id, post_title, message_id FROM posts WHERE folder_id = $1 ORDER BY created_at DESC",
+            folder_id
+        )
     return posts 
 
-def get_folders() -> list:
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM folders")
-    folders = cursor.fetchall()
-    conn.close()
-    return folders 
+async def get_folders() -> list:
+    global pool
+    async with pool.acquire() as conn:
+        folders_records = await conn.fetch("SELECT id, name FROM folders")
+    return [(row['id'], row['name']) for row in folders_records]
 
 def escape_markdown(text):
     if text is None:
@@ -415,7 +360,6 @@ def escape_html(text: str) -> str:
 # --- Клавіатури ---
 
 def get_main_keyboard():
-    """Клавіатура для /start (з кнопкою контакту)."""
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Надіслати свій номер телефону", request_contact=True)],
@@ -427,7 +371,6 @@ def get_main_keyboard():
     return keyboard
 
 def get_menu_only_keyboard():
-    """Створює постійну клавіатуру ТІЛЬКИ з кнопкою Меню (для звичайних юзерів)."""
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📂 Меню")]
@@ -438,7 +381,6 @@ def get_menu_only_keyboard():
     return keyboard
 
 def get_admin_keyboard():
-    """Створює постійну клавіатуру для Адмінів."""
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📂 Меню")], 
@@ -450,15 +392,14 @@ def get_admin_keyboard():
     return keyboard
 
 async def generate_folder_keyboard(for_admin: bool = False, is_admin_menu: bool = False) -> InlineKeyboardMarkup:
-    """Генерує кнопки папок."""
-    folders = get_folders()
+    folders = await get_folders()
     buttons = []
     
-    if for_admin: # Для /broadcast
+    if for_admin:
         prefix = 'save_to_folder_'
-    elif is_admin_menu: # Для /menu (адмін)
+    elif is_admin_menu:
         prefix = 'admin_folder_' 
-    else: # Для /menu (юзер)
+    else:
         prefix = 'folder_'
 
     for folder_id, name in folders:
@@ -470,25 +411,19 @@ async def generate_folder_keyboard(for_admin: bool = False, is_admin_menu: bool 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def generate_posts_list_keyboard(posts: list, is_admin: bool = False) -> InlineKeyboardMarkup:
-    """Генерує кнопки для кожного поста у папці."""
     buttons = []
     for (post_id, title, msg_id) in posts:
         row = [
             InlineKeyboardButton(text=title, callback_data=f"view_post_{msg_id}")
         ]
-        
         if is_admin:
             row.append(InlineKeyboardButton(text="❌ Видалити", callback_data=f"del_post_{post_id}"))
-            
         buttons.append(row)
     
     buttons.append([InlineKeyboardButton(text="⬅️ До Головного меню", callback_data="back_to_menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def extract_user_id_from_reply(msg: types.Message) -> Optional[int]:
-    """
-    Пробує витягти user_id з різних джерел.
-    """
     if not msg:
         return None
     if getattr(msg, "forward_from", None):
@@ -498,14 +433,12 @@ def extract_user_id_from_reply(msg: types.Message) -> Optional[int]:
                 return int(fid)
         except Exception:
             pass
-    
     text_candidates = []
     if getattr(msg, "caption", None):
         text_candidates.append(msg.caption)
     if getattr(msg, "text", None):
         text_candidates.append(msg.text)
     
-    # ❗ ВИПРАВЛЕНО: Шукаємо ЧИСТИЙ ТЕКСТ (без HTML-тегів)
     marker_code_re = re.compile(r"🔑\s*ID\s*:\s*(\d{4,})", re.IGNORECASE)
     
     for txt in text_candidates:
@@ -524,13 +457,12 @@ def extract_user_id_from_reply(msg: types.Message) -> Optional[int]:
 
 # --- ЛОГІКА РОЗСИЛКИ (ВИДІЛЕНА ФУНКЦІЯ) ---
 async def process_broadcast_message(content_chat_id: int, content_message_id: int, message: Message, broadcast_filter: str = None):
-    """Обробляє та надсилає розсилку шляхом копіювання контенту."""
     
     if broadcast_filter:
-        users = get_users_by_query(broadcast_filter)
+        users = await get_users_by_query(broadcast_filter)
         filter_info = f"за фільтром '{broadcast_filter}' (знайдено {len(users)})"
     else:
-        users = get_active_users()
+        users = await get_active_users()
         filter_info = f"усім активним користувачам ({len(users)})"
 
     await message.answer(f"Починаю розсилку {filter_info}. Будь ласка, зачекайте.")
@@ -573,24 +505,20 @@ async def cmd_start(message: Message):
     username = message.from_user.username or "Unknown"
     full_name = message.from_user.full_name or "Невідоме ім'я"
     
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user_id,))
-    phone = cursor.fetchone()
-    conn.close()
+    global pool
+    async with pool.acquire() as conn:
+        phone = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
 
-    add_user(user_id, username, full_name, phone[0] if phone else None) 
+    await add_user(user_id, username, full_name, phone) 
     
     if user_id in ADMINS:
         keyboard = get_admin_keyboard()
         greeting = f"Привіт, Адміністраторе {message.from_user.first_name or ''}! 👋"
-    elif phone and phone[0]:
+    elif phone:
         keyboard = get_menu_only_keyboard()
-        # ❗ ОНОВЛЕНО: Привітання для тих, хто ВЖЕ в базі (старий юзер)
         greeting = f"Привіт, {message.from_user.first_name or 'друже'}! 👋"
     else:
         keyboard = get_main_keyboard()
-        # ❗ ОНОВЛЕНО: Привітання для НОВИХ (просимо номер)
         greeting = (
             f"Привіт, {message.from_user.first_name or 'друже'}! 🎉 Ви приєднались до бота.\n"
             "Будь ласка, **натисніть кнопку нижче**, щоб поділитися номером телефону для повної реєстрації."
@@ -630,25 +558,27 @@ async def cmd_check_db(message: Message):
     if message.from_user.id not in ADMINS:
         await message.reply("У вас немає прав адміністратора для цієї команди.")
         return
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, full_name, phone_number FROM users")
-    results = cursor.fetchall()
-    conn.close()
+    
+    global pool
+    async with pool.acquire() as conn:
+        results = await conn.fetch("SELECT user_id, username, full_name, phone_number FROM users")
+    
     total_count = len(results)
     if total_count == 0:
         await message.reply("База даних порожня. Записів не знайдено.")
         return
+        
     response = f"**Звіт по базі даних `users`:**\n\nУСЬОГО ЗАПИСІВ: **{total_count}**\n============================\n"
-    for uid, username, full_name, phone_number in results:
-        safe_full_name = escape_markdown(full_name)
-        safe_username = escape_markdown(username or 'НЕМАЄ')
-        phone_display = phone_number or 'НЕМАЄ'
-        if len(response) + 300 > 4096 and uid != results[-1][0]: 
-            response += f"... (та ще {total_count - results.index((uid, username, full_name, phone_number))} записів)"
+    for i, row in enumerate(results):
+        safe_full_name = escape_markdown(row['full_name'])
+        safe_username = escape_markdown(row['username'] or 'НЕМАЄ')
+        phone_display = row['phone_number'] or 'НЕМАЄ'
+        
+        if len(response) + 300 > 4096 and i < total_count - 1: 
+            response += f"... (та ще {total_count - i} записів)"
             break
         response += (
-            f"🔑 ID: `{uid}`\n👤 Ім'я: **{safe_full_name}**\n📞 Телефон: `{phone_display}`\n🆔 Username: @{safe_username}\n----------------------------\n"
+            f"🔑 ID: `{row['user_id']}`\n👤 Ім'я: **{safe_full_name}**\n📞 Телефон: `{phone_display}`\n🆔 Username: @{safe_username}\n----------------------------\n"
         )
     await message.reply(response, parse_mode='Markdown')
 
@@ -658,27 +588,26 @@ async def cmd_check_tickets(message: Message):
         await message.reply("У вас немає прав адміністратора для цієї команди.")
         return
 
-    tickets = get_open_tickets()
+    tickets = await get_open_tickets()
     
     if not tickets:
         await message.answer("✅ Чудова робота! Усі тікети закриті. Повідомлень без відповіді немає.")
         return
         
     response = f"📢 **ВІДКРИТІ ТІКЕТИ ({len(tickets)}):**\n\n"
-    for (user_id, user_name, message_text, created_at) in tickets:
-        safe_name = escape_html(user_name)
-        safe_text = escape_html(message_text[:100] + '...') 
+    for ticket in tickets:
+        safe_name = escape_html(ticket['user_name'])
+        safe_text = escape_html(ticket['message_text'][:100] + '...') 
         
         response += (
-            f"👤 <b>{safe_name}</b> (ID: <code>{user_id}</code>)\n"
-            f"<i>{created_at}</i>\n"
+            f"👤 <b>{safe_name}</b> (ID: <code>{ticket['user_id']}</code>)\n"
+            f"<i>{ticket['created_at'].strftime('%Y-%m-%d %H:%M')}</i>\n"
             f"💬 {safe_text}\n"
             "--------------------\n"
         )
     
     await message.answer(response, parse_mode='HTML')
 
-# ❗ ОНОВЛЕНО: /delete_user тепер приймає ID або Телефон
 @dp.message(Command("delete_user"))
 async def cmd_delete_user(message: Message):
     if message.from_user.id not in ADMINS:
@@ -694,35 +623,27 @@ async def cmd_delete_user(message: Message):
     identifier = parts[1].strip()
     target_user_id = None
     
-    # 1. Спробуємо розпізнати як ID
-    if identifier.isdigit():
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (int(identifier),))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            target_user_id = result[0]
-            logging.info(f"Знайдено користувача за ID: {target_user_id}")
-
-    # 2. Якщо не ID, спробуємо як Телефон
-    if not target_user_id:
-        logging.info(f"Не знайдено за ID, шукаємо за телефоном: {identifier}")
-        target_user_id = get_user_id_by_phone_strict(identifier)
-        if target_user_id:
-            logging.info(f"Знайдено користувача за телефоном: {target_user_id}")
+    global pool
+    async with pool.acquire() as conn:
+        if identifier.isdigit():
+            target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", int(identifier))
+            if target_user_id:
+                logging.info(f"Знайдено користувача за ID: {target_user_id}")
+        
+        if not target_user_id:
+            logging.info(f"Не знайдено за ID, шукаємо за телефоном: {identifier}")
+            target_user_id = await get_user_id_by_phone_strict(identifier)
+            if target_user_id:
+                logging.info(f"Знайдено користувача за телефоном: {target_user_id}")
             
-    # 3. Видаляємо
     if target_user_id:
         try:
-            delete_user(target_user_id) # Видаляємо за ID
+            await delete_user(target_user_id) 
             await message.reply(f"✅ Користувача (ID: {target_user_id}, Запит: {identifier}) успішно видалено з бази даних.")
         except Exception as e:
             await message.reply(f"Помилка під час видалення: {e}")
     else:
         await message.reply(f"❌ Помилка: Користувача з ID або номером телефону '{identifier}' не знайдено.")
-
-# ❗ ВИДАЛЕНО: /delete_phone (об'єднано з /delete_user)
 
 @dp.message(Command("add_folder"))
 async def cmd_add_folder(message: Message):
@@ -734,7 +655,7 @@ async def cmd_add_folder(message: Message):
         await message.reply("Будь ласка, вкажіть назву папки. Приклад: /add_folder 💡 Лайфхаки")
         return
     folder_name = parts[1].strip()
-    if add_new_folder(folder_name):
+    if await add_new_folder(folder_name):
         await message.reply(f"✅ Папку '{folder_name}' успішно створено!")
     else:
         await message.reply(f"❌ Помилка: Папка з назвою '{folder_name}' вже існує.")
@@ -749,7 +670,7 @@ async def cmd_delete_folder(message: Message):
         await message.reply('Будь ласка, вкажіть точну назву папки для видалення. \nПриклад: /delete_folder "🎥 Відеоогляди"')
         return
     folder_name = parts[1].strip().strip('"') 
-    if delete_folder_by_name(folder_name):
+    if await delete_folder_by_name(folder_name):
         await message.reply(f"✅ Папку '{folder_name}' та всі її пости успішно видалено.")
     else:
         await message.reply(f"❌ Помилка: Папку з назвою '{folder_name}' не знайдено.")
@@ -768,7 +689,7 @@ async def cmd_delete_post(message: Message):
     
     post_title = parts[1].strip().strip('"')
     
-    if delete_post_by_title(post_title):
+    if await delete_post_by_title(post_title):
         await message.reply(f"✅ Пост '{post_title}' успішно видалено з 'Меню'.")
     else:
         await message.reply(f"❌ Помилка: Пост з назвою '{post_title}' не знайдено.")
@@ -783,25 +704,28 @@ async def cmd_find_user(message: Message):
         await message.reply("Вкажіть частину імені, username або номер телефону для пошуку. Приклад: /find_user 38067")
         return
     query = parts[1].strip()
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT user_id, username, full_name, phone_number FROM users WHERE full_name LIKE ? OR username LIKE ? OR phone_number LIKE ?",
-        ('%' + query + '%', '%' + query + '%', '%' + query + '%')
-    )
-    results = cursor.fetchall()
-    conn.close()
+    
+    global pool
+    async with pool.acquire() as conn:
+        results = await conn.fetch(
+            "SELECT user_id, username, full_name, phone_number FROM users WHERE full_name LIKE $1 OR username LIKE $1 OR phone_number LIKE $1",
+            '%' + query + '%'
+        )
+        
     if not results:
         await message.reply(f"Користувачів, які містять '{query}', не знайдено.")
         return
     response = f"**Знайдено {len(results)} користувачів за запитом '{query}':**\n\n"
-    for uid, username, full_name, phone_number in results:
-        safe_full_name = escape_markdown(full_name)
-        safe_username = escape_markdown(username or 'no_username')
-        phone_display = phone_number or 'немає'
+    for i, row in enumerate(results):
+        safe_full_name = escape_markdown(row['full_name'])
+        safe_username = escape_markdown(row['username'] or 'no_username')
+        phone_display = row['phone_number'] or 'немає'
         user_info = f"👤 **{safe_full_name}** ({safe_username})\n"
         user_info += f"📞 Телефон: `{phone_display}`\n" 
-        user_info += f"🔑 ID: `{uid}`\n"
+        user_info += f"🔑 ID: `{row['user_id']}`\n"
+        if len(response) + len(user_info) > 4000 and i < len(results) - 1:
+             response += f"... (та ще {len(results) - i} записів)"
+             break
         response += user_info + "--------------------------\n"
     await message.reply(response, parse_mode='Markdown')
 
@@ -811,11 +735,11 @@ async def cmd_export_csv(message: Message):
         await message.reply("У вас немає прав адміністратора для цієї команди.")
         return
     await message.answer("Починаю експорт даних...")
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, full_name, phone_number FROM users")
-    results = cursor.fetchall()
-    conn.close()
+    
+    global pool
+    async with pool.acquire() as conn:
+        results = await conn.fetch("SELECT user_id, username, full_name, phone_number FROM users")
+        
     if not results:
         await message.answer("База даних порожня. Немає чого експортувати.")
         return
@@ -823,7 +747,10 @@ async def cmd_export_csv(message: Message):
     csv_writer = csv.writer(csv_buffer, delimiter=';', quotechar='"', quoting=csv.QUOTE_MINIMAL)
     headers = ['ID', 'Username', "Full Name", 'Phone Number']
     csv_writer.writerow(headers)
-    csv_writer.writerows(results)
+    
+    for row in results:
+        csv_writer.writerow([row['user_id'], row['username'], row['full_name'], row['phone_number']])
+        
     csv_buffer.seek(0)
     try:
         await message.reply_document(
@@ -850,21 +777,18 @@ async def cmd_send_to_user(message: Message):
     text_to_send = parts[2].strip()
     target_user_id = None
     
-    if identifier.isdigit():
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (int(identifier),))
-        result = cursor.fetchone()
-        conn.close()
-        if result:
-            target_user_id = result[0]
-            logging.info(f"Знайдено користувача за ID: {target_user_id}")
-    
-    if not target_user_id:
-        logging.info(f"Не знайдено за ID, шукаємо за телефоном: {identifier}")
-        target_user_id = get_user_id_by_phone_strict(identifier)
-        if target_user_id:
-            logging.info(f"Знайдено користувача за телефоном: {target_user_id}")
+    global pool
+    async with pool.acquire() as conn:
+        if identifier.isdigit():
+            target_user_id = await conn.fetchval("SELECT user_id FROM users WHERE user_id = $1", int(identifier))
+            if target_user_id:
+                logging.info(f"Знайдено користувача за ID: {target_user_id}")
+        
+        if not target_user_id:
+            logging.info(f"Не знайдено за ID, шукаємо за телефоном: {identifier}")
+            target_user_id = await get_user_id_by_phone_strict(identifier) # Ця функція вже використовує pool
+            if target_user_id:
+                logging.info(f"Знайдено користувача за телефоном: {target_user_id}")
         
     if not target_user_id:
         await message.reply(f"❌ Помилка: Користувача з ID або номером телефону '{identifier}' не знайдено в базі даних.")
@@ -903,7 +827,7 @@ async def cmd_send_segment(message: Message):
     if not identifiers or not text_to_send:
         await message.reply("Не вдалося розпізнати список ідентифікаторів або текст повідомлення. Переконайтесь, що список йде перед текстом.")
         return
-    users_data = get_users_by_list(identifiers)
+    users_data = await get_users_by_list(identifiers)
     target_uids = list(users_data.keys())
     if not target_uids:
         await message.reply(f"Не знайдено жодного користувача за вказаними {len(identifiers)} ідентифікаторами.")
@@ -949,7 +873,7 @@ async def cmd_delete_segment(message: Message):
         return
 
     try:
-        deleted_count = delete_users_by_list(identifiers)
+        deleted_count = await delete_users_by_list(identifiers)
         
         if deleted_count > 0:
             await message.reply(f"✅ Успішно видалено **{deleted_count}** користувач(а/ів) з бази даних.", parse_mode='Markdown')
@@ -1082,7 +1006,7 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
     # 3. Зберігаємо в БД (якщо обрана папка)
     if folder_id != 0:
         try:
-            save_post(folder_id, post_title, archive_message_id)
+            await save_post(folder_id, post_title, archive_message_id)
             await callback.message.edit_text(f"Пост збережено у папку. Починаю розсилку...")
         except Exception as e:
             logging.error(f"Помилка збереження посту в БД: {e}")
@@ -1115,7 +1039,7 @@ async def show_folder_contents(target: types.Message | types.CallbackQuery, fold
         if isinstance(target, types.CallbackQuery): await target.answer()
         return
         
-    posts = get_all_posts_by_folder(folder_id)
+    posts = await get_all_posts_by_folder(folder_id)
     
     if not posts:
         text = "Ця папка поки порожня."
@@ -1179,7 +1103,7 @@ async def handle_delete_post_click(callback: CallbackQuery):
     post_id = int(callback.data.split('_')[-1])
     
     try:
-        success, folder_id = delete_post_by_id(post_id) 
+        success, folder_id = await delete_post_by_id(post_id) 
         
         if success and folder_id:
             await callback.answer("✅ Пост видалено з меню!", show_alert=False)
@@ -1231,16 +1155,14 @@ async def handle_all_messages(message: Message, state: FSMContext):
         user_id = message.from_user.id
         phone = message.contact.phone_number
         
-        conn_check = sqlite3.connect(DB_PATH)
-        cursor_check = conn_check.cursor()
-        cursor_check.execute("SELECT username, full_name FROM users WHERE user_id = ?", (user_id,))
-        user_data = cursor_check.fetchone()
-        conn_check.close()
+        global pool
+        async with pool.acquire() as conn:
+            user_data = await conn.fetchrow("SELECT username, full_name FROM users WHERE user_id = $1", user_id)
         
-        username = user_data[0] if user_data else "Unknown"
-        full_name = user_data[1] if user_data else "Невідоме ім'я"
+        username = user_data['username'] if user_data else "Unknown"
+        full_name = user_data['full_name'] if user_data else "Невідоме ім'я"
         
-        add_user(user_id, username, full_name, phone)
+        await add_user(user_id, username, full_name, phone)
         
         keyboard = get_admin_keyboard() if user_id in ADMINS else get_menu_only_keyboard()
         
@@ -1288,7 +1210,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
                 await message.answer(f"✅ Відповідь успішно надіслана користувачу з ID: <code>{target_user_id}</code>", parse_mode='HTML')
                 
-                close_support_ticket(target_user_id, admin_id)
+                await close_support_ticket(target_user_id, admin_id)
                 return
                 
             except TelegramForbiddenError:
@@ -1348,22 +1270,20 @@ async def handle_all_messages(message: Message, state: FSMContext):
         user_id = message.from_user.id
         user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
         
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT phone_number FROM users WHERE user_id = ?", (user_id,))
-        phone_number = cursor.fetchone()
-        conn.close()
+        global pool
+        async with pool.acquire() as conn:
+            phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
         
-        phone_display = phone_number[0] if phone_number and phone_number[0] else 'НЕ НАДАНО'
+        phone_display = phone_number or 'НЕ НАДАНО'
         
         safe_user_name = escape_html(user_name)
         safe_phone = escape_html(phone_display)
         
         # ❗ Створюємо тікет
         if message.text:
-            log_support_ticket(user_id, user_name, message.text[:200]) 
+            await log_support_ticket(user_id, user_name, message.text[:200]) 
         else:
-            log_support_ticket(user_id, user_name, f"[{message.content_type or 'медіа'}]")
+            await log_support_ticket(user_id, user_name, f"[{message.content_type or 'медіа'}]")
 
         caption = (
             f"📩 <b>НОВЕ ПОВІДОМЛЕННЯ ВІД КОРИСТУВАЧА</b>\n"
@@ -1389,18 +1309,33 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
 # --- Запуск бота ---
 async def main():
+    global pool
+    
     if not BOT_TOKEN:
         logging.critical("Помилка: Не знайдено BOT_TOKEN. Перевірте файл .env.")
         return
     if not ARCHIVE_CHANNEL_ID:
         logging.critical("Помилка: Не знайдено ARCHIVE_CHANNEL_ID. Перевірте файл .env.")
         return
+    if not DATABASE_URL:
+        logging.critical("Помилка: Не знайдено DATABASE_URL (посилання на Neon). Перевірте файл .env.")
+        return
 
-    init_db()
-    populate_folders_if_empty() # Заповнення папок при старті
-    logging.info("Бот запущений ✅")
-    
-    await dp.start_polling(bot)
+    try:
+        pool = await asyncpg.create_pool(DATABASE_URL)
+        await init_db()
+        await populate_folders_if_empty() # Заповнення папок при старті
+        logging.info("Бот запущений ✅")
+        
+        await dp.start_polling(bot)
+        
+    except Exception as e:
+        logging.critical(f"Критична помилка при запуску або підключенні до БД: {e}")
+    finally:
+        if pool:
+            await pool.close()
+            logging.info("Пул підключень до БД закрито.")
+
 
 if __name__ == "__main__":
     try:
@@ -1408,4 +1343,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("Бот зупинено вручну (Ctrl+C).")
     except Exception as e:
-        logging.critical(f"Помилка при запуску бота: {e}")
+        # Це дублювання, але воно потрібне, якщо main() впаде до запуску
+        logging.critical(f"Помилка при запуску бота (asyncio.run): {e}")
