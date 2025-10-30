@@ -1281,7 +1281,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         user_id = message.from_user.id
         user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
         
-        global pool
         async with pool.acquire() as conn:
             phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
         
