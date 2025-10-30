@@ -1,8 +1,8 @@
 # bot.py
 import os
 import asyncio
-import sqlite3 # Ми його більше не використовуємо, але нехай залишається
-import asyncpg # ❗ ДОДАНО: Драйвер для Neon/PostgreSQL
+import sqlite3 # Ми його більше не використовуємо, але імпорт не заважає
+import asyncpg # ❗ Драйвер для Neon/PostgreSQL
 import csv
 import io
 import logging 
@@ -57,9 +57,7 @@ class BroadcastStates(StatesGroup):
 async def init_db():
     """Ініціалізує базу даних PostgreSQL."""
     global pool
-    # Створюємо підключення
-    pool = await asyncpg.create_pool(DATABASE_URL)
-    
+    # 'pool' вже створено в main(), ми його просто використовуємо
     async with pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -113,7 +111,6 @@ async def populate_folders_if_empty():
         if count == 0:
             logging.info("База 'folders' порожня. Заповнюємо...")
             try:
-                # Використовуємо $1, $2... замість ?
                 await conn.executemany("INSERT INTO folders (name) VALUES ($1)",
                                        [(name,) for name in folders_to_add])
                 logging.info("Папки за замовчуванням додано.")
@@ -172,12 +169,10 @@ async def delete_folder_by_name(name: str) -> bool:
     global pool
     async with pool.acquire() as conn:
         try:
-            # Використовуємо RETURNING id, щоб отримати ID папки, яку видаляємо
             folder_id = await conn.fetchval("SELECT id FROM folders WHERE name = $1", name)
             if not folder_id:
                 return False 
             
-            # Видаляємо пости (PostgreSQL підтримує ON DELETE CASCADE)
             await conn.execute("DELETE FROM posts WHERE folder_id = $1", folder_id)
             await conn.execute("DELETE FROM folders WHERE id = $1", folder_id)
             logging.info(f"Папку ID {folder_id} ({name}) та її пости видалено.")
@@ -190,7 +185,6 @@ async def delete_post_by_id(post_id: int) -> (bool, Optional[int]):
     global pool
     async with pool.acquire() as conn:
         try:
-            # Використовуємо RETURNING, щоб отримати folder_id за один запит
             result = await conn.fetchrow("DELETE FROM posts WHERE id = $1 RETURNING folder_id", post_id)
             if result:
                 logging.info(f"Пост ID {post_id} видалено з бази.")
@@ -206,7 +200,7 @@ async def delete_post_by_title(title: str) -> bool:
     async with pool.acquire() as conn:
         try:
             result = await conn.execute("DELETE FROM posts WHERE post_title = $1", title)
-            if result == 'DELETE 1':
+            if 'DELETE 1' in result:
                 logging.info(f"Пост '{title}' видалено з бази.")
                 return True
             else:
@@ -218,7 +212,6 @@ async def delete_post_by_title(title: str) -> bool:
 async def add_user(user_id: int, username: str, full_name: str, phone_number: str = None):
     global pool
     async with pool.acquire() as conn:
-        # Використовуємо ON CONFLICT для безпечного оновлення
         await conn.execute(
             """
             INSERT INTO users (user_id, username, full_name, phone_number) 
@@ -226,7 +219,7 @@ async def add_user(user_id: int, username: str, full_name: str, phone_number: st
             ON CONFLICT (user_id) DO UPDATE SET
                 username = EXCLUDED.username,
                 full_name = EXCLUDED.full_name,
-                phone_number = COALESCE(EXCLUDED.phone_number, users.phone_number)
+                phone_number = COALESCE($4, users.phone_number)
             """,
             user_id, username, full_name, phone_number
         )
@@ -265,7 +258,6 @@ async def delete_users_by_list(identifiers: list) -> int:
     
     async with pool.acquire() as conn:
         try:
-            # Використовуємо ANY($1::TEXT[]) - це синтаксис PostgreSQL
             result = await conn.fetch(
                 """
                 DELETE FROM users
@@ -514,17 +506,20 @@ async def cmd_start(message: Message):
     if user_id in ADMINS:
         keyboard = get_admin_keyboard()
         greeting = f"Привіт, Адміністраторе {message.from_user.first_name or ''}! 👋"
+        await message.answer(greeting, reply_markup=keyboard)
+        
     elif phone:
         keyboard = get_menu_only_keyboard()
         greeting = f"Привіт, {message.from_user.first_name or 'друже'}! 👋"
+        await message.answer(greeting, reply_markup=keyboard)
+    
     else:
         keyboard = get_main_keyboard()
         greeting = (
             f"Привіт, {message.from_user.first_name or 'друже'}! 🎉 Ви приєднались до бота.\n"
             "Будь ласка, **натисніть кнопку нижче**, щоб поділитися номером телефону для повної реєстрації."
         )
-    
-    await message.answer(greeting, reply_markup=keyboard, parse_mode='Markdown')
+        await message.answer(greeting, reply_markup=keyboard, parse_mode='Markdown')
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: Message):
@@ -632,7 +627,7 @@ async def cmd_delete_user(message: Message):
         
         if not target_user_id:
             logging.info(f"Не знайдено за ID, шукаємо за телефоном: {identifier}")
-            target_user_id = await get_user_id_by_phone_strict(identifier)
+            target_user_id = await get_user_id_by_phone_strict(identifier) # Ця функція вже використовує pool
             if target_user_id:
                 logging.info(f"Знайдено користувача за телефоном: {target_user_id}")
             
@@ -786,7 +781,7 @@ async def cmd_send_to_user(message: Message):
         
         if not target_user_id:
             logging.info(f"Не знайдено за ID, шукаємо за телефоном: {identifier}")
-            target_user_id = await get_user_id_by_phone_strict(identifier) # Ця функція вже використовує pool
+            target_user_id = await get_user_id_by_phone_strict(identifier) 
             if target_user_id:
                 logging.info(f"Знайдено користувача за телефоном: {target_user_id}")
         
@@ -1193,14 +1188,12 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
         if target_user_id:
             try:
-                # ❗ ОНОВЛЕНО: Отримуємо персоналізований підпис адміна
-                admin_signature = ADMIN_TITLES.get(admin_id, "адміністратора") # Запасний варіант
+                admin_signature = ADMIN_TITLES.get(admin_id, "адміністратора") 
                 
                 if message.text:
                     safe_admin_text = escape_html(message.text)
                     await bot.send_message(
                         chat_id=target_user_id,
-                        # ❗ ОНОВЛЕНО: Використовуємо підпис
                         text=f"👨‍💻 <b>Відповідь від {admin_signature}:</b>\n\n{safe_admin_text}",
                         parse_mode='HTML'
                     )
@@ -1270,7 +1263,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
         user_id = message.from_user.id
         user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
         
-        global pool
+    
         async with pool.acquire() as conn:
             phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
         
@@ -1309,8 +1302,8 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
 # --- Запуск бота ---
 async def main():
-    global pool
-    
+    global pool  # 🟢 Перенесено сюди, щоб pool був доступний глобально
+
     if not BOT_TOKEN:
         logging.critical("Помилка: Не знайдено BOT_TOKEN. Перевірте файл .env.")
         return
@@ -1322,13 +1315,14 @@ async def main():
         return
 
     try:
+        # ❗ Створюємо пул підключень ОДИН РАЗ
         pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
-        await populate_folders_if_empty() # Заповнення папок при старті
+        await populate_folders_if_empty()  # Заповнення папок при старті
         logging.info("Бот запущений ✅")
-        
+
         await dp.start_polling(bot)
-        
+
     except Exception as e:
         logging.critical(f"Критична помилка при запуску або підключенні до БД: {e}")
     finally:
@@ -1337,11 +1331,7 @@ async def main():
             logging.info("Пул підключень до БД закрито.")
 
 
+# --- Запуск з консолі ---
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Бот зупинено вручну (Ctrl+C).")
-    except Exception as e:
-        # Це дублювання, але воно потрібне, якщо main() впаде до запуску
-        logging.critical(f"Помилка при запуску бота (asyncio.run): {e}")
+    import asyncio
+    asyncio.run(main())
