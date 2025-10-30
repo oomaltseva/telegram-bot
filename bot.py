@@ -1,7 +1,7 @@
 # bot.py
 import os
 import asyncio
-import sqlite3 # Ми його більше не використовуємо, але імпорт не заважає
+import sqlite3
 import asyncpg # ❗ Драйвер для Neon/PostgreSQL
 import csv
 import io
@@ -50,6 +50,7 @@ WEB_SERVER_PORT = int(os.getenv("PORT", 8080)) # Render надає порт у �
 
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
+
 
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
@@ -208,8 +209,7 @@ async def delete_post_by_title(title: str) -> bool:
     async with pool.acquire() as conn:
         try:
             result = await conn.execute("DELETE FROM posts WHERE post_title = $1", title)
-            # Перевіряємо, чи щось було видалено
-            if result and int(result.split()[-1]) > 0:
+            if 'DELETE 1' in result:
                 logging.info(f"Пост '{title}' видалено з бази.")
                 return True
             else:
@@ -515,31 +515,29 @@ async def cmd_start(message: Message):
     if user_id in ADMINS:
         keyboard = get_admin_keyboard()
         greeting = f"Привіт, Адміністраторе {message.from_user.first_name or ''}! 👋"
-        await message.answer(greeting, reply_markup=keyboard)
-        
+        # ❗ Адмін теж повинен надіслати номер, якщо його немає
+        if not phone:
+             greeting += "\n\n(Адмін, не забудь також надіслати свій контакт для тестування та збереження в БД)"
+             keyboard = ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="Надіслати свій номер телефону", request_contact=True)],
+                    [KeyboardButton(text="📂 Меню")],
+                    [KeyboardButton(text="👑 Адмін-панель")] 
+                ],
+                resize_keyboard=True,
+                one_time_keyboard=True 
+            )
     elif phone:
         keyboard = get_menu_only_keyboard()
-        # ❗ ОНОВЛЕНО: Привітання для тих, хто ВЖЕ в базі (старий юзер)
-        greeting = f"""🌿 Привіт!
-Раді вітати тебе у навчальному боті EVA ХРК 💚
-
-Тут ти знайдеш:
-📚 корисні матеріали для розвитку,
-🗓 актуальні навчальні події,
-🧠 опитування для вдосконалення,
-і найголовніше — підтримку на твоєму шляху в EVA 🌸
-
-Твій номер ({phone}) збережено. Тепер тобі доступне 'Меню' 👇"""
-        await message.answer(greeting, reply_markup=keyboard)
-    
+        greeting = f"Привіт, {message.from_user.first_name or 'друже'}! 👋"
     else:
         keyboard = get_main_keyboard()
-        # ❗ ОНОВЛЕНО: Привітання для НОВИХ (просимо номер)
         greeting = (
             f"Привіт, {message.from_user.first_name or 'друже'}! 🎉 Ви приєднались до бота.\n"
             "Будь ласка, **натисніть кнопку нижче**, щоб поділитися номером телефону для повної реєстрації."
         )
-        await message.answer(greeting, reply_markup=keyboard, parse_mode='Markdown')
+    
+    await message.answer(greeting, reply_markup=keyboard, parse_mode='Markdown')
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: Message):
@@ -647,7 +645,7 @@ async def cmd_delete_user(message: Message):
         
         if not target_user_id:
             logging.info(f"Не знайдено за ID, шукаємо за телефоном: {identifier}")
-            target_user_id = await get_user_id_by_phone_strict(identifier) # Ця функція вже використовує pool
+            target_user_id = await get_user_id_by_phone_strict(identifier) 
             if target_user_id:
                 logging.info(f"Знайдено користувача за телефоном: {target_user_id}")
             
@@ -1191,7 +1189,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
 🧠 опитування для вдосконалення,
 і найголовніше — підтримку на твоєму шляху в EVA 🌸
 
-Твій номер ({phone}) збережено. Тепер тобі доступне 'Меню' 👇"""
+Натисни меню нижче, щоб розпочати 👇"""
         
         await message.answer(
             greeting,
@@ -1208,14 +1206,12 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
         if target_user_id:
             try:
-                # ❗ ОНОВЛЕНО: Отримуємо персоналізований підпис адміна
-                admin_signature = ADMIN_TITLES.get(admin_id, "адміністратора") # Запасний варіант
+                admin_signature = ADMIN_TITLES.get(admin_id, "адміністратора") 
                 
                 if message.text:
                     safe_admin_text = escape_html(message.text)
                     await bot.send_message(
                         chat_id=target_user_id,
-                        # ❗ ОНОВЛЕНО: Використовуємо підпис
                         text=f"👨‍💻 <b>Відповідь від {admin_signature}:</b>\n\n{safe_admin_text}",
                         parse_mode='HTML'
                     )
@@ -1322,42 +1318,100 @@ async def handle_all_messages(message: Message, state: FSMContext):
     pass 
 
 
-# --- Запуск бота ---
-async def main():
-    # ❗ ВИПРАВЛЕНО: 'global pool' оголошується на початку
-    global pool 
-    
-    if not BOT_TOKEN:
-        logging.critical("Помилка: Не знайдено BOT_TOKEN. Перевірте файл .env.")
-        return
-    if not ARCHIVE_CHANNEL_ID:
-        logging.critical("Помилка: Не знайдено ARCHIVE_CHANNEL_ID. Перевірте файл .env.")
-        return
-    if not DATABASE_URL:
-        logging.critical("Помилка: Не знайдено DATABASE_URL (посилання на Neon). Перевірте файл .env.")
-        return
+# --- ❗❗❗ ОНОВЛЕНИЙ БЛОК ЗАПУСКУ (WEBHOOK + POLLING) ❗❗❗ ---
 
+async def on_startup(bot_instance: Bot):
+    """Виконується при старті: підключає БД та встановлює вебхук."""
+    global pool
+    
+    if not DATABASE_URL:
+        logging.critical("Помилка: Не знайдено DATABASE_URL. Бот не може запуститися.")
+        return
+        
     try:
-        # ❗ Створюємо пул підключень ОДИН РАЗ
         pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
-        await populate_folders_if_empty() # Заповнення папок при старті
-        logging.info("Бот запущений ✅")
-        
-        await dp.start_polling(bot)
-        
+        await populate_folders_if_empty()
+        logging.info("База даних PostgreSQL успішно підключена.")
     except Exception as e:
-        logging.critical(f"Критична помилка при запуску або підключенні до БД: {e}")
-    finally:
-        if pool:
-            await pool.close()
-            logging.info("Пул підключень до БД закрито.")
+        logging.critical(f"Критична помилка при підключенні до БД: {e}")
+        return
+
+    # Встановлюємо вебхук (тільки якщо ми на Render)
+    if BASE_WEBHOOK_URL:
+        try:
+            await bot_instance.set_webhook(WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
+            logging.info(f"Вебхук встановлено на: {WEBHOOK_URL}")
+        except Exception as e:
+            logging.error(f"Помилка встановлення вебхука: {e}")
+    else:
+        logging.warning("BASE_WEBHOOK_URL не знайдено. Запуск в режимі Polling (для локального тесту).")
+        await bot_instance.delete_webhook(drop_pending_updates=True)
+
+async def on_shutdown(bot_instance: Bot):
+    """Виконується при зупинці: закриває пул БД."""
+    global pool
+    if pool:
+        await pool.close()
+        logging.info("Пул підключень до БД закрито.")
+    # Видаляємо вебхук (тільки якщо ми на Render)
+    if BASE_WEBHOOK_URL:
+        await bot_instance.delete_webhook(drop_pending_updates=True)
+        logging.info("Вебхук видалено.")
+
+async def main_polling():
+    """Запускає бота в режимі Polling (для локального тесту)."""
+    global pool
+    pool = await asyncpg.create_pool(DATABASE_URL)
+    await init_db()
+    await populate_folders_if_empty()
+    logging.info("Бот запущений ✅ (Polling)")
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
+async def main_webhook():
+    """Запускає бота в режимі Webhook (для сервера Render)."""
+    logging.info("Запуск в режимі Webhook (сервер)...")
+    
+    # Реєструємо функції запуску/зупинки
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    app = web.Application()
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+    await site.start()
+    
+    logging.info(f"Сервер запущено на {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
+    
+    # Чекаємо, поки нас не зупинять
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("Бот зупинено вручну (Ctrl+C).")
-    except Exception as e:
-        logging.critical(f"Помилка при запуску бота (asyncio.run): {e}")
+    if not BOT_TOKEN:
+        logging.critical("Помилка: Не знайдено BOT_TOKEN. Перевірте файл .env.")
+    elif not DATABASE_URL:
+        logging.critical("Помилка: Не знайдено DATABASE_URL (посилання на Neon). Перевірте файл .env.")
+    elif not ARCHIVE_CHANNEL_ID:
+         logging.critical("Помилка: Не знайдено ARCHIVE_CHANNEL_ID. Перевірте файл .env.")
+    else:
+        try:
+            # Вирішуємо, як запускатися
+            if BASE_WEBHOOK_URL:
+                # Ми на Render, запускаємо Webhook
+                asyncio.run(main_webhook())
+            else:
+                # Ми локально, запускаємо Polling
+                asyncio.run(main_polling())
+        except KeyboardInterrupt:
+            logging.info("Бот зупинено вручну (Ctrl+C).")
+        except Exception as e:
+            logging.critical(f"Помилка при запуску бота (asyncio.run): {e}")
