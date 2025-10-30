@@ -51,7 +51,6 @@ WEB_SERVER_PORT = int(os.getenv("PORT", 8080)) # Render надає порт у �
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"{BASE_WEBHOOK_URL}{WEBHOOK_PATH}"
 
-
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage) 
@@ -515,7 +514,7 @@ async def cmd_start(message: Message):
     if user_id in ADMINS:
         keyboard = get_admin_keyboard()
         greeting = f"Привіт, Адміністраторе {message.from_user.first_name or ''}! 👋"
-        # ❗ Адмін теж повинен надіслати номер, якщо його немає
+        
         if not phone:
              greeting += "\n\n(Адмін, не забудь також надіслати свій контакт для тестування та збереження в БД)"
              keyboard = ReplyKeyboardMarkup(
@@ -529,7 +528,16 @@ async def cmd_start(message: Message):
             )
     elif phone:
         keyboard = get_menu_only_keyboard()
-        greeting = f"Привіт, {message.from_user.first_name or 'друже'}! 👋"
+        greeting = f"""🌿 Привіт!
+Раді вітати тебе у навчальному боті EVA ХРК 💚
+
+Тут ти знайдеш:
+📚 корисні матеріали для розвитку,
+🗓 актуальні навчальні події,
+🧠 опитування для вдосконалення,
+і найголовніше — підтримку на твоєму шляху в EVA 🌸
+
+Натисню меню нижче, щоб розпочати 👇"""
     else:
         keyboard = get_main_keyboard()
         greeting = (
@@ -537,7 +545,7 @@ async def cmd_start(message: Message):
             "Будь ласка, **натисніть кнопку нижче**, щоб поділитися номером телефону для повної реєстрації."
         )
     
-    await message.answer(greeting, reply_markup=keyboard, parse_mode='Markdown')
+    await message.answer(greeting, reply_markup=keyboard, parse_mode='Markdown' if user_id not in ADMINS and not phone else None)
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: Message):
@@ -1281,6 +1289,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
         user_id = message.from_user.id
         user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
         
+        pool
         async with pool.acquire() as conn:
             phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
         
@@ -1328,6 +1337,7 @@ async def on_startup(bot_instance: Bot):
         return
         
     try:
+        # Створюємо пул підключень ТУТ
         pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
         await populate_folders_if_empty()
@@ -1345,6 +1355,7 @@ async def on_startup(bot_instance: Bot):
             logging.error(f"Помилка встановлення вебхука: {e}")
     else:
         logging.warning("BASE_WEBHOOK_URL не знайдено. Запуск в режимі Polling (для локального тесту).")
+        # Якщо локально, чистимо старі вебхуки
         await bot_instance.delete_webhook(drop_pending_updates=True)
 
 async def on_shutdown(bot_instance: Bot):
@@ -1361,17 +1372,23 @@ async def on_shutdown(bot_instance: Bot):
 async def main_polling():
     """Запускає бота в режимі Polling (для локального тесту)."""
     global pool
+    # ❗ ВИПРАВЛЕНО: 'global pool' оголошується до 'pool = ...'
     pool = await asyncpg.create_pool(DATABASE_URL)
     await init_db()
     await populate_folders_if_empty()
     logging.info("Бот запущений ✅ (Polling)")
+    
+    # Реєструємо функції життєвого циклу
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 async def main_webhook():
     """Запускає бота в режимі Webhook (для сервера Render)."""
     logging.info("Запуск в режимі Webhook (сервер)...")
     
-    # Реєструємо функції запуску/зупинки
+    # Реєструємо функції життєвого циклу
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
