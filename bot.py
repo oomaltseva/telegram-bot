@@ -1340,7 +1340,7 @@ async def main():
         return
     if not ARCHIVE_CHANNEL_ID:
         logging.warning("⚠️ ARCHIVE_CHANNEL_ID не знайдено. Деякі функції можуть не працювати.")
-    
+
     try:
         import asyncpg
         from aiohttp import web
@@ -1353,7 +1353,7 @@ async def main():
 
         app = web.Application()
 
-        # --- Підключення диспетчера до AIOHTTP через SimpleRequestHandler ---
+        # --- Підключення диспетчера до AIOHTTP ---
         webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
         webhook_handler.register(app, path="/webhook")
 
@@ -1371,15 +1371,21 @@ async def main():
 
         setup_application(app, dp, bot=bot)
 
-        web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+        # --- 🔧 Замість asyncio.run(...) ---
+        return app
 
     except Exception as e:
         logging.critical(f"Критична помилка запуску: {e}")
-    finally:
         if pool:
             await pool.close()
             logging.info("🔒 Пул підключень до БД закрито")
 
-if __name__ == "__main__":
+
+# --- 🚀 Запуск на Render ---
+if os.getenv("RENDER") or os.getenv("RENDER_EXTERNAL_URL"):
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(main())
+    # Render сам піднімає сервер
+else:
     import asyncio
     asyncio.run(main())
