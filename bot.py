@@ -1329,82 +1329,151 @@ async def handle_all_messages(message: Message, state: FSMContext):
 # --- ❗❗❗ ОНОВЛЕНИЙ БЛОК ЗАПУСКУ (WEBHOOK + POLLING) ❗❗❗ ---
 
     # --- Запуск бота ---
-    import os
-    import logging
-    import asyncpg
-    from aiohttp import web
-    from aiogram import Bot, Dispatcher
-    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+# --- Запуск бота ---
+import os
+import logging
+import asyncpg
+import asyncio
+from aiohttp import web
 
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    ARCHIVE_CHANNEL_ID = os.getenv("ARCHIVE_CHANNEL_ID")
+# ❗ ВАЖЛИВО:
+# ❗ Імпорти 'Bot' і 'Dispatcher' тут ВИДАЛЕНО.
+# ❗ Вони мають бути імпортовані ТІЛЬКИ ОДИН РАЗ на самому початку
+# ❗ вашого файлу bot.py, там, де ви їх і оголошуєте.
+from aiogram.webhook.aiohttp_server import setup_application
 
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher()
-    pool= None  # глобальний пул
 
-    # --- Функції для ініціалізації БД і папок (залишаємо твої) ---
-    # async def init_db():
-    #     ...
-    # async def populate_folders_if_empty():
-    #     ...
+# ❗ ВАЖЛИВО:
+# ❗ ВСІ ЦІ РЯДКИ (BOT_TOKEN, bot=, dp=) ТРЕБА ПОВНІСТЮ ВИДАЛИТИ
+# ❗ з цього блоку в кінці файлу.
+#
+# ❗ Вони вже існують у вашому глобальному скоупі (на початку файлу).
+# ❗ Повторне оголошення 'dp = Dispatcher()' тут - це і є причина 404.
+#
+# BOT_TOKEN = os.getenv("BOT_TOKEN")              # <--- ВИДАЛИТИ
+# DATABASE_URL = os.getenv("DATABASE_URL")        # <--- ВИДАЛИТИ
+# ARCHIVE_CHANNEL_ID = os.getenv("ARCHIVE_CHANNEL_ID") # <--- ВИДАЛИТИ
+#
+# bot = Bot(token=BOT_TOKEN)                      # <--- ВИДАЛИТИ (критична помилка)
+# dp = Dispatcher()                               # <--- ВИДАЛИТИ (критична помилка 404)
+# pool= None                                      # <--- ВИДАЛИТИ (вже оголошено глобально)
 
-    async def main():
-        global pool
 
-        if not BOT_TOKEN:
-            logging.critical("❌ Не знайдено BOT_TOKEN. Перевірте .env")
-            return
-        if not DATABASE_URL:
-            logging.critical("❌ Не знайдено DATABASE_URL. Перевірте .env")
-            return
-        if not ARCHIVE_CHANNEL_ID:
-            logging.warning("⚠️ ARCHIVE_CHANNEL_ID не знайдено. Деякі функції можуть не працювати.")
+# ❗ Важливо: ми припускаємо, що у вас ГЛОБАЛЬНО (на початку файлу) вже є:
+# 1. bot = Bot(...)
+# 2. dp = Dispatcher(...) (з усіма вашими хендлерами)
+# 3. pool: asyncpg.Pool = None
+# 4. Глобальні функції: async def init_db(), async def populate_folders_if_empty()
+# 5. Глобальні змінні з .env:
+#    - BOT_TOKEN, DATABASE_URL, ARCHIVE_CHANNEL_ID
+#    - BASE_WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
+#    - WEBHOOK_PATH
+#    - WEBHOOK_URL
+#    - WEB_SERVER_HOST
+#    - WEB_SERVER_PORT
 
-        # --- Підключення до бази ---
+
+async def on_startup(app: web.Application):
+    """Виконується ПІД ЧАС запуску aiohttp."""
+    global pool # Отримуємо доступ до глобального 'pool'
+    
+    logging.info("Початок процедури on_startup...")
+    
+    # 1. Перевіряємо, чи .env завантажено (чи є змінні)
+    if not DATABASE_URL:
+        logging.critical("❌ DATABASE_URL не знайдено! Перевірте .env")
+        raise RuntimeError("DATABASE_URL not set")
+    if not WEBHOOK_URL:
+        logging.critical("❌ WEBHOOK_URL не знайдено! Переконайтесь, що RENDER_EXTERNAL_URL є в .env")
+        raise RuntimeError("WEBHOOK_URL not set")
+        
+    # 2. Створюємо пул БД
+    try:
         pool = await asyncpg.create_pool(DATABASE_URL)
+        # ❗ Ініціалізуємо БД ТУТ, ПІСЛЯ створення пулу
         await init_db()
         await populate_folders_if_empty()
-        logging.info("✅ Бот ініціалізовано")
+        logging.info("✅ Пул бази даних створено та ініціалізовано.")
+    except Exception as e:
+        logging.critical(f"❌ Помилка підключення/ініціалізації БД: {e}")
+        raise # Зупиняємо запуск, якщо БД не працює
+        
+    # 3. Встановлюємо вебхук
+    try:
+        # ❗ Використовуємо глобальну змінну WEBHOOK_URL (яка має брати RENDER_EXTERNAL_URL)
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+        logging.info(f"📡 Вебхук встановлено: {WEBHOOK_URL}")
+    except Exception as e:
+        logging.error(f"❌ Помилка встановлення вебхука: {e}")
+        raise # Це також критично
 
-        # --- Створюємо AIOHTTP-додаток ---
-        app = web.Application()
-
-        # --- Root route для перевірки ---
-        async def handle_root(request):
-            return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
-
-        app.router.add_get("/", handle_root)
-
-        # --- Налаштування вебхука ---
-        WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-        WEBHOOK_URL = f"https://telegram-bot-cqrb.onrender.com{WEBHOOK_PATH}"
-
-        webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-        webhook_handler.register(app, path=WEBHOOK_PATH)
-        setup_application(app, dp, bot=bot)
-
-        # --- Startup / Shutdown ---
-        async def on_startup(app):
-            await bot.set_webhook(WEBHOOK_URL)
-            logging.info(f"📡 Вебхук встановлено: {WEBHOOK_URL}")
-
-        async def on_shutdown(app):
-            await bot.delete_webhook()
-            await bot.session.close()
-            global pool
+async def on_shutdown(app: web.Application):
+    """Виконується ПЕРЕД зупинкою aiohttp."""
+    global pool # Отримуємо доступ до глобального 'pool'
+    
+    logging.info("Початок процедури on_shutdown...")
+    
+    # 1. Видаляємо вебхук
+    try:
+        await bot.delete_webhook()
+        logging.info("🧹 Вебхук видалено")
+    except Exception as e:
+        logging.error(f"Помилка видалення вебхука: {e}")
+        
+    # 2. Закриваємо сесію бота
+    await bot.session.close()
+    logging.info("🧹 Сесію бота закрито")
+    
+    # 3. Закриваємо пул БД
+    if pool:
+        try:
             await pool.close()
-            logging.info("🧹 Вебхук і сесія очищені")
+            logging.info("🧹 Пул бази даних закрито")
+        except Exception as e:
+            logging.error(f"Помилка закриття пулу БД: {e}")
 
-        app.on_startup.append(on_startup)
-        app.on_shutdown.append(on_shutdown)
+async def handle_root(request: web.Request) -> web.Response:
+    """Для перевірок 'health check' від Render."""
+    return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
 
-        # --- Запуск веб-сервера ---
-        port = int(os.environ.get("PORT", 8080))
-        web.run_app(app, host="0.0.0.0", port=port)
+def main():
+    """Основна функція для конфігурації та запуску веб-сервера."""
+    
+    # ❗ Перевіряємо, чи завантажено .env
+    if not BOT_TOKEN:
+        logging.critical("❌ Не знайдено BOT_TOKEN. Перевірте .env. Запуск неможливий.")
+        return
+            
+    # Створюємо AIOHTTP-додаток
+    app = web.Application()
 
-    # --- Запуск main при імпорті ---
-    if __name__ == "__main__":
-        import asyncio
-        asyncio.run(main())
+    # Реєструємо хендлери життєвого циклу (on_startup / on_shutdown)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+
+    # Root route для перевірки
+    app.router.add_get("/", handle_root)
+    
+    # ❗ Це єдиний правильний спосіб реєстрації вебхука в aiogram 3+
+    # ❗ Він використовує ГЛОБАЛЬНИЙ 'dp' (з вашими командами)
+    # ❗ і ГЛОБАЛЬНИЙ 'WEBHOOK_PATH' (з .env)
+    setup_application(app, dp, bot=bot, webhook_path=WEBHOOK_PATH)
+    
+    logging.info(f"Хендлер вебхука зареєстровано на шляху: {WEBHOOK_PATH}")
+
+    # --- Запуск веб-сервера ---
+    # ❗ Використовуємо ГЛОБАЛЬНІ змінні WEB_SERVER_HOST та WEB_SERVER_PORT
+    # ❗ (вони мають бути визначені на початку файлу)
+    logging.info(f"======== 🚀 Запуск сервера на http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT} ========")
+    web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+
+
+# --- Запуск main ---
+if __name__ == "__main__":
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit, RuntimeError) as e:
+        if isinstance(e, RuntimeError):
+            logging.critical(f"ПОМИЛКА ЗАПУСКУ: {e}")
+        else:
+            logging.info("Бот зупинено.")
