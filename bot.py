@@ -1471,10 +1471,11 @@ async def start_bot_runner():
     # 3. Root route для перевірки
     app.router.add_get("/", handle_root)
     
-    # 4. Реєстрація вебхука (НАЙНАДІЙНІШИЙ МЕТОД)
+    # 4. Реєстрація вебхука (НОВИЙ, ЧИСТИЙ МЕТОД)
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_handler.register(app, path=WEBHOOK_PATH)
-    setup_application(app, dp, bot=bot, handle_webhooks=False)
+
+    # *** МИ ВИДАЛИЛИ setup_application, бо він конфліктує з AppRunner ***
     
     logging.info(f"Хендлер вебхука зареєстровано (SimpleRequestHandler) на шляху: {WEBHOOK_PATH}")
 
