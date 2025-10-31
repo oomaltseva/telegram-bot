@@ -1384,8 +1384,15 @@ async def main():
 # --- 🚀 Запуск на Render ---
 if os.getenv("RENDER") or os.getenv("RENDER_EXTERNAL_URL"):
     import asyncio
-    asyncio.get_event_loop().run_until_complete(main())
-    # Render сам піднімає сервер
-else:
-    import asyncio
-    asyncio.run(main())
+    from aiohttp import web
+
+    if os.getenv("RENDER") or os.getenv("RENDER_EXTERNAL_URL"):
+        # Render запускає наш веб-додаток
+        import asyncio
+        app = asyncio.get_event_loop().run_until_complete(main())
+
+        port = int(os.getenv("PORT", 10000))
+        web.run_app(app, host="0.0.0.0", port=port)
+
+    else:
+        asyncio.run(main())
