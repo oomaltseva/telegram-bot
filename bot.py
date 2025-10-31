@@ -1328,106 +1328,50 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
 # --- ❗❗❗ ОНОВЛЕНИЙ БЛОК ЗАПУСКУ (WEBHOOK + POLLING) ❗❗❗ ---
 
-async def on_startup(bot_instance: Bot):
-    """Виконується при старті: підключає БД та встановлює вебхук."""
+# --- Запуск бота ---
+async def main():
     global pool
-    
-    if not DATABASE_URL:
-        logging.critical("Помилка: Не знайдено DATABASE_URL. Бот не може запуститися.")
+
+    if not BOT_TOKEN:
+        logging.critical("❌ Не знайдено BOT_TOKEN. Перевірте .env")
         return
-        
+    if not DATABASE_URL:
+        logging.critical("❌ Не знайдено DATABASE_URL. Перевірте .env")
+        return
+    if not ARCHIVE_CHANNEL_ID:
+        logging.warning("⚠️ ARCHIVE_CHANNEL_ID не знайдено. Деякі функції можуть не працювати.")
+    
     try:
-        # Створюємо пул підключень ТУТ
         pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
         await populate_folders_if_empty()
-        logging.info("База даних PostgreSQL успішно підключена.")
+        logging.info("✅ Бот ініціалізовано")
+
+        from aiohttp import web
+
+        async def on_startup(app):
+            await bot.set_webhook(WEBHOOK_URL)
+            logging.info(f"📡 Вебхук встановлено: {WEBHOOK_URL}")
+
+        async def on_shutdown(app):
+            await bot.delete_webhook()
+            await bot.session.close()
+            logging.info("🧹 Вебхук і сесія очищені")
+
+        app = web.Application()
+        app.router.add_post("/webhook", dp.webhook_handler())
+        app.on_startup.append(on_startup)
+        app.on_shutdown.append(on_shutdown)
+
+        web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
     except Exception as e:
-        logging.critical(f"Критична помилка при підключенні до БД: {e}")
-        return
-
-    # Встановлюємо вебхук (тільки якщо ми на Render)
-    if BASE_WEBHOOK_URL:
-        try:
-            await bot_instance.set_webhook(WEBHOOK_URL, allowed_updates=dp.resolve_used_update_types())
-            logging.info(f"Вебхук встановлено на: {WEBHOOK_URL}")
-        except Exception as e:
-            logging.error(f"Помилка встановлення вебхука: {e}")
-    else:
-        logging.warning("BASE_WEBHOOK_URL не знайдено. Запуск в режимі Polling (для локального тесту).")
-        # Якщо локально, чистимо старі вебхуки
-        await bot_instance.delete_webhook(drop_pending_updates=True)
-
-async def on_shutdown(bot_instance: Bot):
-    """Виконується при зупинці: закриває пул БД."""
-    global pool
-    if pool:
-        await pool.close()
-        logging.info("Пул підключень до БД закрито.")
-    # Видаляємо вебхук (тільки якщо ми на Render)
-    if BASE_WEBHOOK_URL:
-        await bot_instance.delete_webhook(drop_pending_updates=True)
-        logging.info("Вебхук видалено.")
-
-async def main_polling():
-    """Запускає бота в режимі Polling (для локального тесту)."""
-    global pool
-    # ❗ ВИПРАВЛЕНО: 'global pool' оголошується до 'pool = ...'
-    pool = await asyncpg.create_pool(DATABASE_URL)
-    await init_db()
-    await populate_folders_if_empty()
-    logging.info("Бот запущений ✅ (Polling)")
-    
-    # Реєструємо функції життєвого циклу
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-
-async def main_webhook():
-    """Запускає бота в режимі Webhook (для сервера Render)."""
-    logging.info("Запуск в режимі Webhook (сервер)...")
-    
-    # Реєструємо функції життєвого циклу
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-
-    app = web.Application()
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-    setup_application(app, dp, bot=bot)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
-    await site.start()
-    
-    logging.info(f"Сервер запущено на {WEB_SERVER_HOST}:{WEB_SERVER_PORT}")
-    
-    # Чекаємо, поки нас не зупинять
-    await asyncio.Event().wait()
-
+        logging.critical(f"Критична помилка запуску: {e}")
+    finally:
+        if pool:
+            await pool.close()
+            logging.info("🔒 Пул підключень до БД закрито")
 
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        logging.critical("Помилка: Не знайдено BOT_TOKEN. Перевірте файл .env.")
-    elif not DATABASE_URL:
-        logging.critical("Помилка: Не знайдено DATABASE_URL (посилання на Neon). Перевірте файл .env.")
-    elif not ARCHIVE_CHANNEL_ID:
-         logging.critical("Помилка: Не знайдено ARCHIVE_CHANNEL_ID. Перевірте файл .env.")
-    else:
-        try:
-            # Вирішуємо, як запускатися
-            if BASE_WEBHOOK_URL:
-                # Ми на Render, запускаємо Webhook
-                asyncio.run(main_webhook())
-            else:
-                # Ми локально, запускаємо Polling
-                asyncio.run(main_polling())
-        except KeyboardInterrupt:
-            logging.info("Бот зупинено вручну (Ctrl+C).")
-        except Exception as e:
-            logging.critical(f"Помилка при запуску бота (asyncio.run): {e}")
+    import asyncio
+    asyncio.run(main())
