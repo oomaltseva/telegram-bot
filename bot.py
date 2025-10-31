@@ -1342,12 +1342,20 @@ async def main():
         logging.warning("⚠️ ARCHIVE_CHANNEL_ID не знайдено. Деякі функції можуть не працювати.")
     
     try:
+        import asyncpg
+        from aiohttp import web
+        from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
         pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
         await populate_folders_if_empty()
         logging.info("✅ Бот ініціалізовано")
 
-        from aiohttp import web
+        app = web.Application()
+
+        # --- Підключення диспетчера до AIOHTTP через SimpleRequestHandler ---
+        webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+        webhook_handler.register(app, path="/webhook")
 
         async def on_startup(app):
             await bot.set_webhook(WEBHOOK_URL)
@@ -1358,10 +1366,10 @@ async def main():
             await bot.session.close()
             logging.info("🧹 Вебхук і сесія очищені")
 
-        app = web.Application()
-        app.router.add_post("/webhook", dp.webhook_handler())
         app.on_startup.append(on_startup)
         app.on_shutdown.append(on_shutdown)
+
+        setup_application(app, dp, bot=bot)
 
         web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
