@@ -1361,26 +1361,51 @@ async def main():
     app.router.add_get('/', handle_root)
 
   
-    # --- 4. Налаштування вебхука ---
-    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+    # --- 4. Налаштування вебхука та запуску ---
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+    from aiohttp import web
+
+    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"  # шлях, на який чекає Telegram
     WEBHOOK_URL = f"https://telegram-bot-cqrb.onrender.com{WEBHOOK_PATH}"
 
+    # Створюємо SimpleRequestHandler для обробки апдейтів
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_handler.register(app, path=WEBHOOK_PATH)
+
+    # Підключаємо handler до додатку
     setup_application(app, dp, bot=bot)
 
+    # --- Startup / Shutdown ---
     async def on_startup(app):
         await bot.set_webhook(WEBHOOK_URL)
         logging.info(f"📡 Вебхук встановлено: {WEBHOOK_URL}")
+        # Ініціалізація бази (якщо у тебе є)
+        global pool
+        import asyncpg
+        pool = await asyncpg.create_pool(DATABASE_URL)
+        logging.info("✅ Пул бази даних створено")
+        await init_db()  # твоя функція ініціалізації БД
+        await populate_folders_if_empty()  # твоя функція заповнення папок
 
     async def on_shutdown(app):
         await bot.delete_webhook()
         await bot.session.close()
+        global pool
+        await pool.close()
         logging.info("🧹 Вебхук і сесія очищені")
 
-    # Регіструємо startup/shutdown
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
+    # --- Root route для перевірки ---
+    async def handle_root(request):
+        return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
 
+    app.router.add_get("/", handle_root)
 
+    # --- Запуск веб-сервера ---
+    if __name__ == "__main__":
+        import os
+        from aiohttp import web
+        port = int(os.environ.get("PORT", 8080))
+        web.run_app(app, host="0.0.0.0", port=port)
