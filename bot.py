@@ -1340,7 +1340,7 @@ from aiohttp import web
 # ❗ Імпорти 'Bot' і 'Dispatcher' тут ВИДАЛЕНО.
 # ❗ Вони мають бути імпортовані ТІЛЬКИ ОДИН РАЗ на самому початку
 # ❗ вашого файлу bot.py, там, де ви їх і оголошуєте.
-from aiogram.webhook.aiohttp_server import setup_application
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 
 # ❗ ВАЖЛИВО:
@@ -1436,6 +1436,9 @@ async def handle_root(request: web.Request) -> web.Response:
     """Для перевірок 'health check' від Render."""
     return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
 
+# [ ВАШІ ФУНКЦІЇ on_startup, on_shutdown, handle_root ЗАЛИШАЮТЬСЯ ТУТ БЕЗ ЗМІН ]
+
+# ❗ ЗАМІНІТЬ ВАШУ 'async def main()' НА ЦЮ (З ВИПРАВЛЕНИМИ ВІДСТУПАМИ)
 async def main():
     """
     Основна АСИНХРОННА функція для конфігурації та запуску веб-сервера
@@ -1451,17 +1454,30 @@ async def main():
     app = web.Application()
 
     # 3. Реєструємо хендлери життєвого циклу (on_startup / on_shutdown)
-    #    Вони спрацюють коректно
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
     # 4. Root route для перевірки
     app.router.add_get("/", handle_root)
     
-    # 5. Налаштовуємо aiogram (використовуємо глобальний 'dp' та 'WEBHOOK_PATH')
-    setup_application(app, dp, bot=bot, webhook_path=WEBHOOK_PATH)
+    # 5. Налаштовуємо aiogram (НОВИЙ СПОСІБ)
+        
+    # ❗❗❗ ПОМИЛКА БУЛА ТУТ - Я ПРИБРАВ ЗАЙВИЙ ВІДСТУП ❗❗❗
+    # Реєструємо хендлер "вручну" через SimpleRequestHandler
+    # Це чітко каже aiohttp слухати наш WEBHOOK_PATH
+    webhook_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot
+    )
+    webhook_handler.register(app, path=WEBHOOK_PATH)
     
-    logging.info(f"Хендлер вебхука зареєстровано на шляху: {WEBHOOK_PATH}")
+    # ...і кажемо setup_application налаштувати все інше (FSM тощо),
+    # АЛЕ не чіпати і не реєструвати свої шляхи для вебхуків.
+    setup_application(app, dp, bot=bot, handle_webhooks=False)
+    
+    # Наші debug-логи залишаються, щоб перевірити, що шлях коректний
+    logging.info(f"Хендлер вебхука зареєстровано (через SimpleRequestHandler) на шляху: {WEBHOOK_PATH}")
+    # ❗❗❗ КІНЕЦЬ БЛОКУ З ВИПРАВЛЕННЯМ ❗❗❗
 
     # --- 6. Нова логіка запуску (замість web.run_app) ---
     runner = web.AppRunner(app)
@@ -1471,6 +1487,7 @@ async def main():
     site = web.TCPSite(runner, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
     await site.start()
     
+    # ❗ (Також виправлено помилку в логуванні, тепер {WEB_SERVER_PORT})
     logging.info(f"======== 🚀 Сервер запущено (AppRunner) на http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT} ========")
 
     # 7. Тримаємо сервер живим
@@ -1484,8 +1501,9 @@ async def main():
         await runner.cleanup()
         logging.info("Ресурси AppRunner очищено.")
 
-
-# ❗ ЗАМІНІТЬ ВАШ 'if __name__ == "__main__":' НА ЦЕЙ
+#
+# Блок 'if __name__ == "__main__":' ЗАЛИШАЄТЬСЯ БЕЗ ЗМІН
+#
 if __name__ == "__main__":
     try:
         # ❗ Використовуємо asyncio.run() для запуску АСИНХРОННОЇ main()
