@@ -1342,7 +1342,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
-    pool: asyncpg.pool.Pool = None  # глобальний пул
+    pool= None  # глобальний пул
 
     # --- Функції для ініціалізації БД і папок (залишаємо твої) ---
     # async def init_db():
