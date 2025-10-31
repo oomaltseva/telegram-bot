@@ -1451,63 +1451,63 @@ async def handle_root(request: web.Request) -> web.Response:
 # [ ТАКОЖ ЗАЛИШАЮТЬСЯ БЕЗ ЗМІН ВАШІ ГЛОБАЛЬНІ ЗМІННІ (WEBHOOK_PATH, WEB_SERVER_PORT тощо) ]
 
 ## ❗ Ця функція є СИНХРОННОЮ і тримає процес живим на Render.
-def start_bot_webhook():
+async def start_bot_runner():
     """
-    Головна функція для конфігурації та запуску веб-сервера.
-    Використовує стандартний web.run_app() для максимальної сумісності
-    з Render.
+    Основна АСИНХРОННА функція для запуску через AppRunner.
+    Це фінальний, найжорсткіший, але найнадійніший метод для Render.
     """
     
-    # 1. Перевірка BOT_TOKEN (це вже мало бути в on_startup, але перевірка не завадить)
     if not BOT_TOKEN:
         logging.critical("❌ Не знайдено BOT_TOKEN. Запуск неможливий.")
         return
             
-    # 2. Створюємо AIOHTTP-додаток (залежить від глобального імпорту 'web')
+    # 1. Створюємо AIOHTTP-додаток
     app = web.Application()
 
-    # 3. Реєструємо хендлери життєвого циклу (async)
-    #    Ці функції будуть викликані автоматично web.run_app
+    # 2. Реєструємо хендлери життєвого циклу
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
-    # 4. Root route для перевірки
+    # 3. Root route для перевірки
     app.router.add_get("/", handle_root)
     
-    # 5. Налаштовуємо aiogram (Метод SimpleRequestHandler - ФІКС 404)
-    # ❗ Використовуємо глобальні dp та bot
-    webhook_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot
-    )
-    # Реєструємо хендлер у aiohttp, використовуючи глобальний WEBHOOK_PATH
+    # 4. Реєстрація вебхука (НАЙНАДІЙНІШИЙ МЕТОД)
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
     webhook_handler.register(app, path=WEBHOOK_PATH)
-    
-    # Налаштовуємо setup_application (для FSM, middleware), але вимикаємо webhooks
     setup_application(app, dp, bot=bot, handle_webhooks=False)
     
     logging.info(f"Хендлер вебхука зареєстровано (SimpleRequestHandler) на шляху: {WEBHOOK_PATH}")
-    logging.info(f"======== 🚀 Запуск сервера на http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT} ========")
 
 
-    # 6. Запуск веб-сервера.
-    #    Цей виклик є СИНХРОННИМ і тримає процес живим (ФІКС 1-ХВИЛИНА).
+    # 5. НОВА ЛОГІКА ЗАПУСКУ (ФІКС 1-ХВИЛИНА):
+    #    Використовуємо AppRunner, щоб керувати запуском/зупинкою.
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+    await site.start()
+    
+    logging.info(f"======== 🚀 Сервер запущено (AppRunner/Webhooks) на http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT} ========")
+
+    # 6. БЛОКУЄМО ОСНОВНИЙ ЦИКЛ.
+    #    Це змусить процес залишатися активним і не завершуватися.
     try:
-        web.run_app(
-            app,
-            host=WEB_SERVER_HOST,
-            port=WEB_SERVER_PORT,
-            access_log=None 
-        )
-    except Exception as e:
-        logging.critical(f"❌ Критична помилка під час web.run_app: {e}")
-        
+        # Цей цикл буде виконуватися, доки Render не надішле SIGTERM
+        while True:
+            await asyncio.sleep(3600)  # Чекаємо 1 годину, потім повторюємо
+    except asyncio.CancelledError:
+        logging.info("Основний цикл зупинено.")
+    finally:
+        # Гарантуємо, що Runner буде очищено
+        await runner.cleanup()
+        logging.info("Ресурси AppRunner очищено.")
+
 
 if __name__ == "__main__":
     try:
-        # Викликаємо СИНХРОННУ функцію
-        start_bot_webhook()
-    except (KeyboardInterrupt, SystemExit, RuntimeError) as e:
+        # ❗ Викликаємо АСИНХРОННУ функцію
+        asyncio.run(start_bot_runner())
+    except (KeyboardInterrupt, SystemExit):
         logging.info("Бот зупинено.")
     except Exception as e:
         logging.critical(f"ПОМИЛКА ЗАПУСКУ: {e}")
