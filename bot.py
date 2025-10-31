@@ -1436,46 +1436,62 @@ async def handle_root(request: web.Request) -> web.Response:
     """Для перевірок 'health check' від Render."""
     return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
 
-def main():
-    """Основна функція для конфігурації та запуску веб-сервера."""
+async def main():
+    """
+    Основна АСИНХРОННА функція для конфігурації та запуску веб-сервера
+    через AppRunner (production-ready).
+    """
     
-    # ❗ Перевіряємо, чи завантажено .env
+    # 1. Перевіряємо, чи завантажено .env
     if not BOT_TOKEN:
         logging.critical("❌ Не знайдено BOT_TOKEN. Перевірте .env. Запуск неможливий.")
         return
             
-    # Створюємо AIOHTTP-додаток
+    # 2. Створюємо AIOHTTP-додаток
     app = web.Application()
 
-    # Реєструємо хендлери життєвого циклу (on_startup / on_shutdown)
+    # 3. Реєструємо хендлери життєвого циклу (on_startup / on_shutdown)
+    #    Вони спрацюють коректно
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
-    # Root route для перевірки
+    # 4. Root route для перевірки
     app.router.add_get("/", handle_root)
     
-    # ❗ Це єдиний правильний спосіб реєстрації вебхука в aiogram 3+
-    # ❗ Він використовує ГЛОБАЛЬНИЙ 'dp' (з вашими командами)
-    # ❗ і ГЛОБАЛЬНИЙ 'WEBHOOK_PATH' (з .env)
+    # 5. Налаштовуємо aiogram (використовуємо глобальний 'dp' та 'WEBHOOK_PATH')
     setup_application(app, dp, bot=bot, webhook_path=WEBHOOK_PATH)
     
     logging.info(f"Хендлер вебхука зареєстровано на шляху: {WEBHOOK_PATH}")
 
-    # --- Запуск веб-сервера ---
-    # ❗ Використовуємо ГЛОБАЛЬНІ змінні WEB_SERVER_HOST та WEB_SERVER_PORT
-    # ❗ (вони мають бути визначені на початку файлу)
-    logging.info(f"======== 🚀 Запуск сервера на http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT} ========")
-    logging.info(f"!!! DEBUG: Хендлерів у 'dp' зареєстровано: {len(dp.observers)}")
-    logging.info(f"!!! DEBUG: Реєструємо шлях вебхука: {WEBHOOK_PATH}")
-    web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+    # --- 6. Нова логіка запуску (замість web.run_app) ---
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Використовуємо глобальні змінні для хоста та порта
+    site = web.TCPSite(runner, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
+    await site.start()
+    
+    logging.info(f"======== 🚀 Сервер запущено (AppRunner) на http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT} ========")
+
+    # 7. Тримаємо сервер живим
+    try:
+        # Це просто "вічний сон", поки Render не надішле сигнал зупинки
+        await asyncio.Event().wait()
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+        logging.info("Отримано сигнал зупинки...")
+    finally:
+        # Коректно очищуємо ресурси
+        await runner.cleanup()
+        logging.info("Ресурси AppRunner очищено.")
 
 
-# --- Запуск main ---
+# ❗ ЗАМІНІТЬ ВАШ 'if __name__ == "__main__":' НА ЦЕЙ
 if __name__ == "__main__":
     try:
-        main()
-    except (KeyboardInterrupt, SystemExit, RuntimeError) as e:
-        if isinstance(e, RuntimeError):
-            logging.critical(f"ПОМИЛКА ЗАПУСКУ: {e}")
-        else:
-            logging.info("Бот зупинено.")
+        # ❗ Використовуємо asyncio.run() для запуску АСИНХРОННОЇ main()
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Бот зупинено (KeyboardInterrupt/SystemExit).")
+    except RuntimeError as e:
+        # Ловимо помилки, якщо .env не завантажено
+        logging.critical(f"ПОМИЛКА ЗАПУСКУ: {e}")
