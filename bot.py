@@ -1340,56 +1340,51 @@ async def main():
         return
     if not ARCHIVE_CHANNEL_ID:
         logging.warning("⚠️ ARCHIVE_CHANNEL_ID не знайдено. Деякі функції можуть не працювати.")
-    
-    try:
-        import asyncpg
-        from aiohttp import web
-        from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-        # --- 1. Підключення до бази ---
-        pool = await asyncpg.create_pool(DATABASE_URL)
-        await init_db()
-        await populate_folders_if_empty()
-        logging.info("✅ Бот ініціалізовано")
+    import asyncpg
+    from aiohttp import web
+    from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-        # --- 2. Створення AIOHTTP додатку ---
-        app = web.Application()
+    # --- 1. Підключення до бази ---
+    pool = await asyncpg.create_pool(DATABASE_URL)
+    await init_db()
+    await populate_folders_if_empty()
+    logging.info("✅ Бот ініціалізовано")
 
-        # --- 3. Налаштування вебхука ---
-        webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-        webhook_handler.register(app, path=f"/webhook/{BOT_TOKEN}")
+    # --- 2. Створюємо AIOHTTP-додаток ---
+    app = web.Application()
 
-        async def on_startup(app):
-            await bot.set_webhook(WEBHOOK_URL)
-            logging.info(f"📡 Вебхук встановлено: {WEBHOOK_URL}")
+    # --- 3. Сторінка для перевірки Render ---
+    async def handle_root(request):
+        return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
 
-        async def on_shutdown(app):
-            await bot.delete_webhook()
-            await bot.session.close()
-            logging.info("🧹 Вебхук і сесія очищені")
+    app.router.add_get('/', handle_root)
 
-        app.on_startup.append(on_startup)
-        app.on_shutdown.append(on_shutdown)
+    # --- 4. Налаштування вебхука ---
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_handler.register(app, path=f"/webhook/{BOT_TOKEN}")
 
-        setup_application(app, dp, bot=bot)
+    async def on_startup(app):
+        await bot.set_webhook(WEBHOOK_URL)
+        logging.info(f"📡 Вебхук встановлено: {WEBHOOK_URL}")
 
-        # --- 4. Сторінка для перевірки Render ---
-        async def handle_root(request):
-            return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
+    async def on_shutdown(app):
+        await bot.delete_webhook()
+        await bot.session.close()
+        logging.info("🧹 Вебхук і сесія очищені")
 
-        app.router.add_get('/', handle_root)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
 
-        # --- 5. Запуск серверу ---
-        web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
-
-    except Exception as e:
-        logging.critical(f"Критична помилка запуску: {e}")
-    finally:
-        if pool:
-            await pool.close()
-            logging.info("🔒 Пул підключень до БД закрито")
+    setup_application(app, dp, bot=bot)
+    return app
 
 
+# --- ❗ Розділ для запуску вебсерверу (Render сам запускає event loop) ---
 if __name__ == "__main__":
     import asyncio
-    asyncio.get_event_loop().run_until_complete(main())
+    from aiohttp import web
+
+    # Створюємо додаток і запускаємо сервер (без дублювання loop)
+    app = asyncio.run(main())
+    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
