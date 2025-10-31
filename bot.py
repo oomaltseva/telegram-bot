@@ -1465,6 +1465,8 @@ def main():
     # ❗ Використовуємо ГЛОБАЛЬНІ змінні WEB_SERVER_HOST та WEB_SERVER_PORT
     # ❗ (вони мають бути визначені на початку файлу)
     logging.info(f"======== 🚀 Запуск сервера на http://{WEB_SERVER_HOST}:{WEB_SERVER_PORT} ========")
+    logging.info(f"!!! DEBUG: Хендлерів у 'dp' зареєстровано: {len(dp.observers)}")
+    logging.info(f"!!! DEBUG: Реєструємо шлях вебхука: {WEBHOOK_PATH}")
     web.run_app(app, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
 
 
