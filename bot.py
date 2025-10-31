@@ -1362,7 +1362,7 @@ async def main():
 
   
     # --- 4. Налаштування вебхука ---
-    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"  # шлях для SimpleRequestHandler
+    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
     WEBHOOK_URL = f"https://telegram-bot-cqrb.onrender.com{WEBHOOK_PATH}"
 
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
@@ -1384,53 +1384,3 @@ async def main():
 
 
 
-from aiohttp import web
-import asyncpg
-from aiogram import Bot, Dispatcher
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-import logging
-import os
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-pool: asyncpg.pool.Pool = None  # глобальний пул
-
-async def init_db_pool(app):
-    global pool
-    pool = await asyncpg.create_pool(DATABASE_URL)
-    logging.info("✅ Пул бази даних створено")
-
-async def close_db_pool(app):
-    global pool
-    await pool.close()
-    logging.info("🧹 Пул бази даних закрито")
-
-async def handle_root(request):
-    return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
-
-async def on_startup(app):
-    await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"📡 Вебхук встановлено: {WEBHOOK_URL}")
-    await init_db_pool(app)
-
-async def on_shutdown(app):
-    await bot.delete_webhook()
-    await bot.session.close()
-    await close_db_pool(app)
-    logging.info("🧹 Вебхук і сесія очищені")
-
-app = web.Application()
-app.router.add_get("/", handle_root)
-
-# Регіструємо startup/shutdown
-app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    web.run_app(app, host="0.0.0.0", port=port)
