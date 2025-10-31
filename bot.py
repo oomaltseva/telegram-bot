@@ -1360,9 +1360,14 @@ async def main():
 
     app.router.add_get('/', handle_root)
 
+  
     # --- 4. Налаштування вебхука ---
+    WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"  # шлях для SimpleRequestHandler
+    WEBHOOK_URL = f"https://telegram-bot-cqrb.onrender.com{WEBHOOK_PATH}"
+
     webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-    webhook_handler.register(app, path=f"/webhook/{BOT_TOKEN}")
+    webhook_handler.register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
 
     async def on_startup(app):
         await bot.set_webhook(WEBHOOK_URL)
@@ -1373,11 +1378,10 @@ async def main():
         await bot.session.close()
         logging.info("🧹 Вебхук і сесія очищені")
 
+    # Регіструємо startup/shutdown
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
-    setup_application(app, dp, bot=bot)
-    return app
 
 
 from aiohttp import web
@@ -1422,11 +1426,6 @@ async def on_shutdown(app):
 
 app = web.Application()
 app.router.add_get("/", handle_root)
-
-# Встановлюємо вебхук для aiogram
-webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-webhook_handler.register(app, path=f"/webhook/{BOT_TOKEN}")
-setup_application(app, dp, bot=bot)
 
 # Регіструємо startup/shutdown
 app.on_startup.append(on_startup)
