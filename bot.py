@@ -1340,22 +1340,24 @@ async def main():
         return
     if not ARCHIVE_CHANNEL_ID:
         logging.warning("⚠️ ARCHIVE_CHANNEL_ID не знайдено. Деякі функції можуть не працювати.")
-
+    
     try:
         import asyncpg
         from aiohttp import web
         from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
+        # --- 1. Підключення до бази ---
         pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
         await populate_folders_if_empty()
         logging.info("✅ Бот ініціалізовано")
 
+        # --- 2. Створення AIOHTTP додатку ---
         app = web.Application()
 
-        # --- Підключення диспетчера до AIOHTTP ---
+        # --- 3. Налаштування вебхука ---
         webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
-        webhook_handler.register(app, path="/webhook")
+        webhook_handler.register(app, path=f"/webhook/{BOT_TOKEN}")
 
         async def on_startup(app):
             await bot.set_webhook(WEBHOOK_URL)
@@ -1371,28 +1373,23 @@ async def main():
 
         setup_application(app, dp, bot=bot)
 
-        # --- 🔧 Замість asyncio.run(...) ---
-        return app
+        # --- 4. Сторінка для перевірки Render ---
+        async def handle_root(request):
+            return web.Response(text="✅ EVA HRK бот активний і працює!", content_type='text/plain')
+
+        app.router.add_get('/', handle_root)
+
+        # --- 5. Запуск серверу ---
+        web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
     except Exception as e:
         logging.critical(f"Критична помилка запуску: {e}")
+    finally:
         if pool:
             await pool.close()
             logging.info("🔒 Пул підключень до БД закрито")
 
 
-# --- 🚀 Запуск на Render ---
-if os.getenv("RENDER") or os.getenv("RENDER_EXTERNAL_URL"):
+if __name__ == "__main__":
     import asyncio
-    from aiohttp import web
-
-    if os.getenv("RENDER") or os.getenv("RENDER_EXTERNAL_URL"):
-        # Render запускає наш веб-додаток
-        import asyncio
-        app = asyncio.get_event_loop().run_until_complete(main())
-
-        port = int(os.getenv("PORT", 10000))
-        web.run_app(app, host="0.0.0.0", port=port)
-
-    else:
-        asyncio.run(main())
+    asyncio.get_event_loop().run_until_complete(main())
