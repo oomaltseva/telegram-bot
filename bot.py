@@ -1507,7 +1507,7 @@ if __name__ == "__main__":
     try:
         # Викликаємо СИНХРОННУ функцію
         start_bot_webhook()
-    except (KeyboardInterrupt, SystemExit):
+    except (KeyboardInterrupt, SystemExit, RuntimeError) as e:
         logging.info("Бот зупинено.")
     except Exception as e:
         logging.critical(f"ПОМИЛКА ЗАПУСКУ: {e}")
