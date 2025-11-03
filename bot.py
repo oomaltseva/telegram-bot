@@ -344,7 +344,7 @@ async def get_all_posts_by_folder(folder_id: int):
     global pool
     async with pool.acquire() as conn:
         posts = await conn.fetch(
-            "SELECT id, post_title, message_id FROM posts WHERE folder_id = $1 ORDER BY created_at DESC",
+            "SELECT id, post_title, message_id FROM posts WHERE folder_id = $1 ORDER BY created_at ASC",
             folder_id
         )
     return posts 
@@ -1025,12 +1025,25 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
 
     # 2. Визначаємо фільтр (тільки якщо це був текст)
     broadcast_filter = None
+    is_silent_mode = False 
+    # post_title має бути визначений раніше, у handle_broadcast_content
+    # ми будемо його перезаписувати лише для тихого режиму.
+
     if text_to_check_filter:
-        parts = text_to_check_filter.split(maxsplit=1)
-        if len(parts) == 2 and not text_to_check_filter.startswith('/'):
-            broadcast_filter = parts[0].strip()
-            # Оновлюємо заголовок, щоб він не містив фільтра
-            post_title = parts[1].strip().split('\n')[0][:100]
+        first_token = text_to_check_filter.split(maxsplit=1)[0].strip()
+        
+        # ❗ ТИХИЙ РЕЖИМ: Якщо пост починається з #тихо або #save ❗
+        if first_token == '#тихо' or first_token == '#save':
+            is_silent_mode = True
+            
+            # Вирізаємо команду з тексту для чистої назви кнопки
+            parts = text_to_check_filter.split(maxsplit=1)
+            if len(parts) > 1:
+                clean_text = parts[1]
+                # Перевизначаємо post_title на чисту назву, вирізаючи хештег
+                post_title = clean_text.split('\n')[0].strip()[:100]
+            
+            logging.info("Активовано Тихий режим: збереження без розсилки.")
             
     # 3. Зберігаємо в БД (якщо обрана папка)
     if folder_id != 0:
@@ -1046,15 +1059,18 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("Пост не буде збережено. Починаю розсилку...")
         
     # 4. Запускаємо розсилку (копіюємо з архіву)
-    await process_broadcast_message(
-        content_chat_id=ARCHIVE_CHANNEL_ID,
-        content_message_id=archive_message_id,
-        message=callback.message,
-        broadcast_filter=broadcast_filter
-    )
-    
-    # 5. Очищуємо стан
-    await state.clear()
+    if not is_silent_mode:  # 👈 Головна умова для Гучного/Тихого режиму
+        await process_broadcast_message(
+            content_chat_id=ARCHIVE_CHANNEL_ID,
+            content_message_id=archive_message_id,
+            message=callback.message,
+            broadcast_filter=None # Завжди розсилаємо ВСІМ
+        )
+    else:
+        # Відповідь для адміна, якщо активовано Тихий режим
+        await callback.message.edit_text("✅ Пост збережено у папку. Розсилка пропущена (Тихий режим).")
+        # 5. Очищуємо стан
+        await state.clear()
 
 
 # --- ХЕНДЛЕРИ ДЛЯ ПЕРЕГЛЯДУ ПАПОК (НОВА ЛОГІКА) ---
