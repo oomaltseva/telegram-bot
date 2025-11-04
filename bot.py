@@ -1010,11 +1010,39 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
 
     try:
         # 1. Публікуємо в Канал-Архів
-        archive_msg = await bot.forward_message(
-            chat_id=ARCHIVE_CHANNEL_ID,
-            from_chat_id=chat_id,
-            message_id=message_id
-        )
+    # Визначаємо, що ми надсилаємо в архів (з чистим текстом, якщо це тихий режим)
+    if is_silent_mode and text_to_check_filter:
+        # Очищуємо текст: видаляємо перший токен (наприклад, '#тихо')
+        if len(text_to_check_filter.split(maxsplit=1)) > 1:
+            clean_text = text_to_check_filter.split(maxsplit=1)[1]
+        else:
+            clean_text = "" # Якщо був лише '#тихо'
+    else:
+        # Для Гучного режиму (або якщо #тихо не було), залишаємо оригінальний текст/підпис
+        clean_text = text_to_check_filter
+
+
+    try:
+        # ❗ ВИКОРИСТОВУЄМО copy_message/send_message замість forward_message для контролю тексту
+        
+        # Якщо це чистий текст
+        if callback.message.text and not callback.message.caption:
+            archive_msg = await bot.send_message(
+                chat_id=ARCHIVE_CHANNEL_ID,
+                text=clean_text or post_title, # Якщо тексту немає, використовуємо заголовок
+                parse_mode='Markdown' # Використовуйте ваш звичайний parse_mode
+            )
+        # Якщо це медіа (фото, відео, документ, опитування, тощо)
+        else:
+            archive_msg = await bot.copy_message(
+                chat_id=ARCHIVE_CHANNEL_ID,
+                from_chat_id=chat_id,
+                message_id=message_id,
+                caption=clean_text,
+                # caption=clean_text or callback.message.caption, # Якщо медіа, використовуємо чистий текст як підпис
+                parse_mode='Markdown' # Використовуйте ваш звичайний parse_mode
+            )
+
         archive_message_id = archive_msg.message_id
         
     except Exception as e:
