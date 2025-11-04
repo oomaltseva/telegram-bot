@@ -81,6 +81,7 @@ async def init_db():
                 username TEXT,
                 full_name TEXT,
                 phone_number TEXT
+                tags TEXT DEFAULT '' -- 💡 ПЕРЕКОНАЙТЕСЯ, ЩО ЦЕЙ РЯДОК ДОДАНО
             )
         """)
         await conn.execute("""
@@ -1008,7 +1009,7 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    # 1. ВИЗНАЧЕННЯ РЕЖИМУ ТА ОЧИЩЕННЯ ТЕКСТУ (Консолідований блок)
+    # 1. ВИЗНАЧЕННЯ РЕЖИМУ ТА ОЧИЩЕННЯ ТЕКСТУ
     is_silent_mode = False 
     final_post_text = text_to_check_filter # Початково: весь текст
     
@@ -1022,35 +1023,30 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
             # Вирізаємо команду з тексту і кладемо в final_post_text
             parts = text_to_check_filter.split(maxsplit=1)
             if len(parts) > 1:
-                final_post_text = parts[1].lstrip() # <--- FINAL_POST_TEXT ТЕПЕР ЧИСТИЙ (lstrip видаляє зайві пробіли)
-
-                # ❗❗❗ ФІКС ТУТ: ПЕРЕВИЗНАЧАЄМО post_title ❗❗❗
-                # post_title має бути чистим для назви кнопки
+                final_post_text = parts[1].lstrip() 
+                
+                # ❗ ФІКС: ОЧИЩЕННЯ НАЗВИ КНОПКИ (post_title) ❗
                 post_title = final_post_text.split('\n')[0].strip()[:100]
                 
             else:
                 final_post_text = ""
                 
-            # post_title (для кнопки) вже має бути чистим після FSM або буде чистим після цього блоку
-            
             logging.info("Активовано Тихий режим: збереження без розсилки.")
 
     # 2. ПУБЛІКАЦІЯ В КАНАЛ-АРХІВ (З КОНТРОЛЕМ ТЕКСТУ)
     try:
-        # Використовуємо copy_message/send_message для контролю тексту
-        
-        # Якщо це чистий текст (не медіа з підписом)
-        if callback.message.text and not callback.message.caption:
+        # Якщо це чистий текст (не медіа)
+        if callback.message.text and not callback.message.caption and not callback.message.photo and not callback.message.video and not callback.message.document:
             archive_msg = await bot.send_message(
                 chat_id=ARCHIVE_CHANNEL_ID,
-                text=final_post_text or post_title, 
+                text=final_post_text or post_title,
                 parse_mode='Markdown'
             )
-        # Якщо це медіа (фото, відео, документ, опитування, тощо)
+        # ❗❗❗ ФІКС МЕДІА: Використовуємо copy_message для ВСІХ медіа ❗❗❗
         else:
             archive_msg = await bot.copy_message(
                 chat_id=ARCHIVE_CHANNEL_ID,
-                from_chat_id=chat_id,
+                from_chat_id=chat_id, # ID вашого чату з ботом
                 message_id=message_id,
                 caption=final_post_text, # <--- ТУТ ВИКОРИСТОВУЄМО ЧИСТИЙ ТЕКСТ
                 parse_mode='Markdown' 
@@ -1064,12 +1060,10 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    # 3. ЗБЕРІГАННЯ В БД (з використанням ЧИСТОГО post_title)
+    # 3. ЗБЕРІГАННЯ В БД
     if folder_id != 0:
         try:
-            # post_title тут чистий (встановлений у FSM або очищений вище)
             await save_post(folder_id, post_title, archive_message_id)
-            # Якщо успішно збережено:
             message_response = f"Пост збережено у папку. "
         except Exception as e:
             logging.error(f"Помилка збереження посту в БД: {e}")
@@ -1079,7 +1073,7 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
     else:
         message_response = "Пост не буде збережено. "
         
-    # 4. ЗАПУСКАЄМО РОЗСИЛКУ (або відповідь)
+    # 4. ЗАПУСКАЄМО РОЗСИЛКУ
     if not is_silent_mode:
         await callback.message.edit_text(message_response + "Починаю розсилку...")
         await process_broadcast_message(
@@ -1089,7 +1083,6 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
             broadcast_filter=None
         )
     else:
-        # Відповідь для адміна, якщо активовано Тихий режим
         await callback.message.edit_text("✅ Пост збережено у папку. Розсилка пропущена (Тихий режим).")
         
     # 5. ОЧИЩУЄМО СТАН
@@ -1259,17 +1252,46 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
         target_user_id = extract_user_id_from_reply(reply_message)
 
+            # ❗❗❗ НОВИЙ КОД ДЛЯ ЗБЕРЕЖЕННЯ МІТКИ ❗❗❗
+        tag_to_add = None
+        clean_response_text = message.text # Початково вся відповідь
+        
+        if message.text and message.text.lower().startswith('#tag_'):
+            # 1. Виділяємо мітку
+            parts = message.text.split(maxsplit=1)
+            # Отримуємо чисту мітку, видаляючи #tag_
+            tag_to_add = parts[0].lower().strip('#tag_').strip() 
+            
+            # 2. Очищуємо текст відповіді
+            clean_response_text = parts[1] if len(parts) > 1 else "" 
+            
+            # 3. Зберігаємо мітку в БД
+            if tag_to_add:
+                global pool
+                async with pool.acquire() as conn:
+                    # Оновлюємо, додаючи мітку через кому, якщо мітки вже є
+                    await conn.execute(
+                        "UPDATE users SET tags = CASE WHEN tags = '' THEN $1 ELSE tags || $2 END WHERE user_id = $3",
+                        tag_to_add,
+                        "," + tag_to_add,
+                        target_user_id
+                    )
+                logging.info(f"Додано мітку '{tag_to_add}' до користувача {target_user_id}")
+        # ❗❗❗ КІНЕЦЬ НОВОГО КОДУ ❗❗❗
+
         if target_user_id:
             try:
                 admin_signature = ADMIN_TITLES.get(admin_id, "адміністратора") 
                 
-                if message.text:
-                    safe_admin_text = escape_html(message.text)
+                # Використовуємо clean_response_text для відповіді
+                if clean_response_text:
+                    safe_admin_text = escape_html(clean_response_text)
                     await bot.send_message(
                         chat_id=target_user_id,
                         text=f"👨‍💻 <b>Відповідь від {admin_signature}:</b>\n\n{safe_admin_text}",
                         parse_mode='HTML'
                     )
+
                 else:
                     await message.copy_to(target_user_id) 
                     await bot.send_message(target_user_id, f"(Відповідь від {admin_signature})")
@@ -1334,50 +1356,61 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer(admin_help_text, parse_mode='Markdown')
         return
 
-    # 5. ПЕРЕСИЛАННЯ ПОВІДОМЛЕНЬ ВІД ЗВИЧАЙНИХ КОРИСТУВАЧІВ
-    if message.from_user.id not in ADMINS:
-        # Ігноруємо команди
-        if message.text and message.text.startswith('/'):
-            return 
+        # 5. ПЕРЕСИЛАННЯ ПОВІДОМЛЕНЬ ВІД ЗВИЧАЙНИХ КОРИСТУВАЧІВ
+        if message.from_user.id not in ADMINS:
+            # Ігноруємо команди
+            if message.text and message.text.startswith('/'):
+                return 
+                
+            user_id = message.from_user.id
+            user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
             
-        user_id = message.from_user.id
-        user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
-        
-        pool
-        async with pool.acquire() as conn:
-            phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
-        
-        phone_display = phone_number or 'НЕ НАДАНО'
-        
-        safe_user_name = escape_html(user_name)
-        safe_phone = escape_html(phone_display)
-        
-        # ❗ Створюємо тікет
-        if message.text:
-            await log_support_ticket(user_id, user_name, message.text[:200]) 
-        else:
-            await log_support_ticket(user_id, user_name, f"[{message.content_type or 'медіа'}]")
+            # ❗❗❗ НОВИЙ КОД: ВИБІРКА І ФОРМАТУВАННЯ МІТОК ❗❗❗
+            tags_info = ""
+            global pool
+            async with pool.acquire() as conn:
+                # Отримуємо phone_number (як було)
+                phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
+                # Отримуємо мітки
+                user_tags = await conn.fetchval("SELECT tags FROM users WHERE user_id = $1", user_id)
+            
+            if user_tags and user_tags.strip():
+                # Форматуємо теги для відображення
+                tags_list = [f"<code>#{tag.strip()}</code>" for tag in user_tags.split(',') if tag.strip()]
+                tags_info = " ".join(tags_list)
+                tags_info = f"\n\n🏷️ <b>МІТКИ:</b> {tags_info}" # Додаємо заголовок Мітки
+            # ❗❗❗ КІНЕЦЬ НОВОГО КОДУ ❗❗❗
+            
+            phone_display = phone_number or 'НЕ НАДАНО'
+            
+            safe_user_name = escape_html(user_name)
+            safe_phone = escape_html(phone_display)
+            
+            # ❗ Створюємо тікет
+            message_content = message.text[:200] if message.text else f"[{message.content_type or 'медіа'}]"
+            await log_support_ticket(user_id, user_name, message_content)
 
-        caption = (
-            f"📩 <b>НОВЕ ПОВІДОМЛЕННЯ ВІД КОРИСТУВАЧА</b>\n"
-            f"Ім'я: <b>{safe_user_name}</b>\n" 
-            f"📞 Телефон: <code>{safe_phone}</code>\n"
-            f"🔑 ID: <code>{user_id}</code>\n" 
-            f"--- Щоб відповісти, <b>натисніть 'Відповісти'</b> на це повідомлення. ---"
-        )
+            caption = (
+                f"📩 <b>НОВЕ ПОВІДОМЛЕННЯ ВІД КОРИСТУВАЧА</b>"
+                f"<b>{tags_info}</b>\n" # 💡 ВСТАВЛЯЄМО МІТКИ ТУТ
+                f"Ім'я: <b>{safe_user_name}</b>\n" 
+                f"📞 Телефон: <code>{safe_phone}</code>\n"
+                f"🔑 ID: <code>{user_id}</code>\n" 
+                f"--- Щоб відповісти, <b>натисніть 'Відповісти'</b> на це повідомлення. ---"
+            )
 
-        for target_admin_id in ADMINS:
-            try:
-                await message.forward(target_admin_id) 
-                await bot.send_message(chat_id=target_admin_id, text=caption, parse_mode='HTML')
-            except Exception as e:
-                logging.error(f"Помилка при пересиланні адміністратору {target_admin_id}: {e}")
+            for target_admin_id in ADMINS:
+                try:
+                    await message.forward(target_admin_id) 
+                    await bot.send_message(chat_id=target_admin_id, text=caption, parse_mode='HTML')
+                except Exception as e:
+                    logging.error(f"Помилка при пересиланні адміністратору {target_admin_id}: {e}")
 
-        await message.answer("✅ Ваше повідомлення отримано. Адміністратор незабаром відповість вам.")
-        return
+            await message.answer("✅ Ваше повідомлення отримано. Адміністратор незабаром відповість вам.")
+            return
 
-    # 6. ІНШЕ: Ігноруємо
-    pass 
+        # 6. ІНШЕ: Ігноруємо
+        pass
 
 
 # --- ❗❗❗ ОНОВЛЕНИЙ БЛОК ЗАПУСКУ (WEBHOOK + POLLING) ❗❗❗ ---
