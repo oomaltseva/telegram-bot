@@ -1003,6 +1003,10 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
     post_title = user_data.get('post_title')
     text_to_check_filter = user_data.get('text_to_check_filter')
 
+    # ❗❗❗ ФІКС: ІНІЦІАЛІЗАЦІЯ ЗМІННИХ ❗❗❗
+    is_silent_mode = False 
+    clean_text = text_to_check_filter
+    
     if not chat_id or not message_id or not post_title:
         await callback.message.edit_text("Помилка: Контент розсилки не знайдено (можливо, минув час FSM). Спробуйте /broadcast знову.")
         await state.clear()
