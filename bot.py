@@ -1205,6 +1205,8 @@ async def handle_all_messages(message: Message, state: FSMContext):
     4. Натискання кнопки "Адмін-панель"
     5. Повідомлення від користувачів (пересилання)
     """
+    global pool
+
     admin_id = message.from_user.id
     current_state = await state.get_state()
 
@@ -1216,7 +1218,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
         user_id = message.from_user.id
         phone = message.contact.phone_number
         
-        global pool
+
         async with pool.acquire() as conn:
             user_data = await conn.fetchrow("SELECT username, full_name FROM users WHERE user_id = $1", user_id)
         
@@ -1267,7 +1269,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
             
             # 3. Зберігаємо мітку в БД
             if tag_to_add:
-                global pool
+
                 async with pool.acquire() as conn:
                     # Оновлюємо, додаючи мітку через кому, якщо мітки вже є
                     await conn.execute(
