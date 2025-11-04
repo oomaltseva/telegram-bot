@@ -1008,7 +1008,6 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    try:
         # 1. Публікуємо в Канал-Архів
     # Визначаємо, що ми надсилаємо в архів (з чистим текстом, якщо це тихий режим)
     if is_silent_mode and text_to_check_filter:
