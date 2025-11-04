@@ -80,7 +80,7 @@ async def init_db():
                 user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 full_name TEXT,
-                phone_number TEXT
+                phone_number TEXT,
                 tags TEXT DEFAULT '' -- 💡 ПЕРЕКОНАЙТЕСЯ, ЩО ЦЕЙ РЯДОК ДОДАНО
             )
         """)
