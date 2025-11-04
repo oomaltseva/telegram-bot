@@ -84,6 +84,15 @@ async def init_db():
                 tags TEXT DEFAULT '' -- 💡 ПЕРЕКОНАЙТЕСЯ, ЩО ЦЕЙ РЯДОК ДОДАНО
             )
         """)
+
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'users'::regclass AND attname = 'tags') THEN
+                    ALTER TABLE users ADD COLUMN tags TEXT DEFAULT '';
+                END IF;
+            END $$;
+        """)
+        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS folders (
                 id SERIAL PRIMARY KEY,
@@ -1369,7 +1378,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
             
             # ❗❗❗ НОВИЙ КОД: ВИБІРКА І ФОРМАТУВАННЯ МІТОК ❗❗❗
             tags_info = ""
-            
+            global pool
             async with pool.acquire() as conn:
                 # Отримуємо phone_number (як було)
                 phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
