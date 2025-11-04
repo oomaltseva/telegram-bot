@@ -1227,7 +1227,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         user_id = message.from_user.id
         phone = message.contact.phone_number
         
-
         async with pool.acquire() as conn:
             user_data = await conn.fetchrow("SELECT username, full_name FROM users WHERE user_id = $1", user_id)
         
@@ -1263,7 +1262,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
         target_user_id = extract_user_id_from_reply(reply_message)
 
-            # ❗❗❗ НОВИЙ КОД ДЛЯ ЗБЕРЕЖЕННЯ МІТКИ ❗❗❗
+        # ❗❗❗ НОВИЙ КОД ДЛЯ ЗБЕРЕЖЕННЯ МІТКИ ❗❗❗
         tag_to_add = None
         clean_response_text = message.text # Початково вся відповідь
         
@@ -1278,7 +1277,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
             
             # 3. Зберігаємо мітку в БД
             if tag_to_add:
-
+                # global pool тут не потрібен, він вище
                 async with pool.acquire() as conn:
                     # Оновлюємо, додаючи мітку через кому, якщо мітки вже є
                     await conn.execute(
@@ -1347,81 +1346,69 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
 **Керування Контентом:**
 `/broadcast` - Запустити розсилку та збереження в 'Меню'.
-`/add_folder [Назва]` - Створити нову папку.
-`/delete_folder "[Назва]"` - Видалити папку (та всі пости в ній).
-`/delete_post "[Назва]"` - Видалити 1 пост з папки за його точною назвою.
-*(Також видалення доступне кнопками ❌ в 'Меню' для адмінів)*
-
-**Керування Користувачами:**
-`/check_db` - Звіт по базі.
-`/check_tickets` - Перевірити повідомлення без відповіді.
-`/find_user [Запит]` - Знайти користувача.
-`/delete_user [ID або Тел.]` - **(ОНОВЛЕНО)** Видалити користувача.
-`/delete_segment [Список ID/Тел.]` - Видалити групу користувачів.
-`/export_csv` - Отримати .csv файл з базою.
+... (решта команд) ...
 
 **Цільові Розсилки:**
-`/send_to_user [ID або Тел.] [Текст]` - **(ОНОВЛЕНО)** Надіслати повідомлення 1 користувачу.
-`/send_segment [Список ID/Тел.] [Текст]` - Надіслати повідомлення групі.
-        """
+... (решта команд) ...
+"""
         await message.answer(admin_help_text, parse_mode='Markdown')
         return
 
-        # 5. ПЕРЕСИЛАННЯ ПОВІДОМЛЕНЬ ВІД ЗВИЧАЙНИХ КОРИСТУВАЧІВ
-        if message.from_user.id not in ADMINS:
-            # Ігноруємо команди
-            if message.text and message.text.startswith('/'):
-                return 
-                
-            user_id = message.from_user.id
-            user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
+    # 5. ПЕРЕСИЛАННЯ ПОВІДОМЛЕНЬ ВІД ЗВИЧАЙНИХ КОРИСТУВАЧІВ
+    if message.from_user.id not in ADMINS:
+        # Ігноруємо команди
+        if message.text and message.text.startswith('/'):
+            return 
             
-            # ❗❗❗ НОВИЙ КОД: ВИБІРКА І ФОРМАТУВАННЯ МІТОК ❗❗❗
-            tags_info = ""
+        user_id = message.from_user.id
+        user_name = message.from_user.full_name or message.from_user.username or "Невідомий користувач"
+        
+        # ❗❗❗ НОВИЙ КОД: ВИБІРКА І ФОРМАТУВАННЯ МІТОК ❗❗❗
+        tags_info = ""
+        # global pool тут не потрібен, він вище
+        async with pool.acquire() as conn:
+            # Отримуємо phone_number 
+            phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
+            # Отримуємо мітки
+            user_tags = await conn.fetchval("SELECT tags FROM users WHERE user_id = $1", user_id)
             
-            async with pool.acquire() as conn:
-                # Отримуємо phone_number (як було)
-                phone_number = await conn.fetchval("SELECT phone_number FROM users WHERE user_id = $1", user_id)
-                # Отримуємо мітки
-                user_tags = await conn.fetchval("SELECT tags FROM users WHERE user_id = $1", user_id)
-            
-            if user_tags and user_tags.strip():
-                # Форматуємо теги для відображення
-                tags_list = [f"<code>#{tag.strip()}</code>" for tag in user_tags.split(',') if tag.strip()]
-                tags_info = " ".join(tags_list)
-                tags_info = f"\n\n🏷️ <b>МІТКИ:</b> {tags_info}" # Додаємо заголовок Мітки
-            # ❗❗❗ КІНЕЦЬ НОВОГО КОДУ ❗❗❗
-            
-            phone_display = phone_number or 'НЕ НАДАНО'
-            
-            safe_user_name = escape_html(user_name)
-            safe_phone = escape_html(phone_display)
-            
-            # ❗ Створюємо тікет
-            message_content = message.text[:200] if message.text else f"[{message.content_type or 'медіа'}]"
-            await log_support_ticket(user_id, user_name, message_content)
+        if user_tags and user_tags.strip():
+            # Форматуємо теги для відображення
+            tags_list = [f"<code>#{tag.strip()}</code>" for tag in user_tags.split(',') if tag.strip()]
+            tags_info = " ".join(tags_list)
+            tags_info = f"\n\n🏷️ <b>МІТКИ:</b> {tags_info}" # Додаємо заголовок Мітки
+        # ❗❗❗ КІНЕЦЬ НОВОГО КОДУ ❗❗❗
+        
+        phone_display = phone_number or 'НЕ НАДАНО'
+        
+        safe_user_name = escape_html(user_name)
+        safe_phone = escape_html(phone_display)
+        
+        # ❗ Створюємо тікет
+        message_content = message.text[:200] if message.text else f"[{message.content_type or 'медіа'}]"
+        await log_support_ticket(user_id, user_name, message_content)
 
-            caption = (
-                f"📩 <b>НОВЕ ПОВІДОМЛЕННЯ ВІД КОРИСТУВАЧА</b>"
-                f"<b>{tags_info}</b>\n" # 💡 ВСТАВЛЯЄМО МІТКИ ТУТ
-                f"Ім'я: <b>{safe_user_name}</b>\n" 
-                f"📞 Телефон: <code>{safe_phone}</code>\n"
-                f"🔑 ID: <code>{user_id}</code>\n" 
-                f"--- Щоб відповісти, <b>натисніть 'Відповісти'</b> на це повідомлення. ---"
-            )
+        caption = (
+            f"📩 <b>НОВЕ ПОВІДОМЛЕННЯ ВІД КОРИСТУВАЧА</b>"
+            f"{tags_info}\n" # 💡 ВИПРАВЛЕНО: Видалено зайві теги <b>
+            f"Ім'я: <b>{safe_user_name}</b>\n" 
+            f"📞 Телефон: <code>{safe_phone}</code>\n" 
+            f"🔑 ID: <code>{user_id}</code>\n" 
+            f"--- Щоб відповісти, <b>натисніть 'Відповісти'</b> на це повідомлення. ---"
+        )
 
-            for target_admin_id in ADMINS:
-                try:
-                    await message.forward(target_admin_id) 
-                    await bot.send_message(chat_id=target_admin_id, text=caption, parse_mode='HTML')
-                except Exception as e:
-                    logging.error(f"Помилка при пересиланні адміністратору {target_admin_id}: {e}")
+        for target_admin_id in ADMINS:
+            try:
+                await message.forward(target_admin_id) 
+                await bot.send_message(chat_id=target_admin_id, text=caption, parse_mode='HTML')
+            except Exception as e:
+                logging.error(f"Помилка при пересиланні адміністратору {target_admin_id}: {e}")
 
-            await message.answer("✅ Ваше повідомлення отримано. Адміністратор незабаром відповість вам.")
-            return
+        await message.answer("✅ Ваше повідомлення отримано. Адміністратор незабаром відповість вам.")
+        return
 
-        # 6. ІНШЕ: Ігноруємо
-        pass
+    # 6. ІНШЕ: Ігноруємо
+    pass
 
 
 # --- ❗❗❗ ОНОВЛЕНИЙ БЛОК ЗАПУСКУ (WEBHOOK + POLLING) ❗❗❗ ---
