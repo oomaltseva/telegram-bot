@@ -1023,6 +1023,11 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
             parts = text_to_check_filter.split(maxsplit=1)
             if len(parts) > 1:
                 final_post_text = parts[1].lstrip() # <--- FINAL_POST_TEXT ТЕПЕР ЧИСТИЙ (lstrip видаляє зайві пробіли)
+
+                # ❗❗❗ ФІКС ТУТ: ПЕРЕВИЗНАЧАЄМО post_title ❗❗❗
+                # post_title має бути чистим для назви кнопки
+                post_title = final_post_text.split('\n')[0].strip()[:100]
+                
             else:
                 final_post_text = ""
                 
