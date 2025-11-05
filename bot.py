@@ -1295,32 +1295,76 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
         target_user_id = extract_user_id_from_reply(reply_message)
 
-        # ❗❗❗ НОВИЙ КОД ДЛЯ ЗБЕРЕЖЕННЯ МІТКИ ❗❗❗
-        tag_to_add = None
+        tag_action = None
+        tag_value = None
         clean_response_text = message.text # Початково вся відповідь
         
-        if message.text and message.text.lower().startswith('#tag_'):
-            # 1. Виділяємо мітку
-            parts = message.text.split(maxsplit=1)
-            # Отримуємо чисту мітку, видаляючи #tag_
-            tag_to_add = parts[0].lower().strip('#tag_').strip() 
+        if message.text:
+            first_token = message.text.split(maxsplit=1)[0].lower()
             
-            # 2. Очищуємо текст відповіді
-            clean_response_text = parts[1] if len(parts) > 1 else "" 
-            
-            # 3. Зберігаємо мітку в БД
-            if tag_to_add:
-                # global pool тут не потрібен, він вище
+            if first_token.startswith('#tag_'):
+                tag_action = 'add'
+                tag_value = first_token.strip('#tag_').strip()
+            elif first_token.startswith('#del_'):
+                tag_action = 'del'
+                tag_value = first_token.strip('#del_').strip()
+            elif first_token.startswith('#set_'):
+                tag_action = 'set'
+                tag_value = first_token.strip('#set_').strip()
+
+            # Очищуємо текст відповіді (для відправки користувачу)
+            if tag_action:
+                parts = message.text.split(maxsplit=1)
+                clean_response_text = parts[1] if len(parts) > 1 else "" 
+                
+        # 3. ВИКОНАННЯ ДІЇ З МІТКОЮ В БД
+        if target_user_id and tag_action:
+            log_message = ""
+            try:
                 async with pool.acquire() as conn:
-                    # Оновлюємо, додаючи мітку через кому, якщо мітки вже є
+                    current_tags_str = await conn.fetchval("SELECT tags FROM users WHERE user_id = $1", target_user_id) or ""
+                    current_tags = [t.strip() for t in current_tags_str.split(',') if t.strip()]
+                    
+                    new_tags = []
+                    
+                    if tag_action == 'add':
+                        if tag_value and tag_value not in current_tags:
+                            current_tags.append(tag_value)
+                            log_message = f"Додано мітку: '{tag_value}'."
+                        else:
+                            log_message = f"Мітка '{tag_value}' вже існує або порожня. Дія ADD пропущена."
+                        new_tags = current_tags
+                        
+                    elif tag_action == 'del':
+                        if tag_value and tag_value in current_tags:
+                            new_tags = [t for t in current_tags if t != tag_value]
+                            log_message = f"Видалено мітку: '{tag_value}'."
+                        else:
+                            new_tags = current_tags
+                            log_message = f"Мітка '{tag_value}' не знайдена. Дія DEL пропущена."
+                            
+                    elif tag_action == 'set':
+                        # Якщо tag_value порожній (наприклад, '#set_'), це очищення
+                        if not tag_value:
+                            new_tags = []
+                            log_message = "Усі мітки очищено."
+                        else:
+                            # Заміна всіх міток на нову
+                            new_tags = [tag_value]
+                            log_message = f"Мітка змінена на: '{tag_value}' (Усі старі видалено)."
+
+                    # Зберігаємо оновлений список
+                    new_tags_str = ",".join(new_tags)
                     await conn.execute(
-                        "UPDATE users SET tags = CASE WHEN tags = '' THEN $1 ELSE tags || $2 END WHERE user_id = $3",
-                        tag_to_add,
-                        "," + tag_to_add,
+                        "UPDATE users SET tags = $1 WHERE user_id = $2",
+                        new_tags_str,
                         target_user_id
                     )
-                logging.info(f"Додано мітку '{tag_to_add}' до користувача {target_user_id}")
-        # ❗❗❗ КІНЕЦЬ НОВОГО КОДУ ❗❗❗
+                    logging.info(f"Тегування користувача {target_user_id}. {log_message}")
+                    
+            except Exception as e:
+                logging.error(f"Помилка при керуванні мітками для {target_user_id}: {e}")
+                # Продовжуємо відправляти відповідь, навіть якщо тег не зберігся
 
         if target_user_id:
             try:
