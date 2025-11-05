@@ -992,11 +992,13 @@ async def handle_broadcast_invalid_content(message: Message, state: FSMContext):
     """Обробляє непідтримуваний контент (стікери тощо) у стані розсилки."""
     await message.answer("Непідтримуваний тип контенту (наприклад, стікер або локація). Будь ласка, надішліть текст, фото, відео, документ або опитування. Або /cancel для відміни.")
 
+# bot.py (Повна заміна функції handle_broadcast_folder)
+
 @dp.callback_query(BroadcastStates.waiting_for_folder, F.data.startswith('save_to_folder_'))
 async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
     """
     Отримує папку, ПУБЛІКУЄ в архів, ЗБЕРІГАЄ в БД, 
-    ЗАПУСКАЄ розсилку і чистить стан.
+    ЗАПУСКАЄ розсилку (якщо не тихий режим) і чистить стан.
     """
     await callback.answer() 
     
@@ -1008,62 +1010,28 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
     folder_id = int(callback.data.split('_')[-1])
     user_data = await state.get_data()
     
-    # ❗❗❗ ВИКОРИСТОВУЄМО ЗМІННІ З FSM ДЛЯ ОРИГІНАЛЬНОГО КОНТЕНТУ ❗❗❗
+    # ❗ Отримуємо прапорець, встановлений командою /savepost ❗
+    is_silent_mode = user_data.get('is_silent_mode', False)
+    
+    # Використовуємо змінні з FSM
     chat_id = user_data.get('content_chat_id')
     message_id = user_data.get('content_message_id')
     post_title = user_data.get('post_title')
-    text_to_check_filter = user_data.get('text_to_check_filter') # Весь оригінальний текст/підпис
-
+    
+    # 1. Перевірка на контент
     if not chat_id or not message_id or not post_title:
         await callback.message.edit_text("Помилка: Контент розсилки не знайдено (можливо, минув час FSM). Спробуйте /broadcast знову.")
         await state.clear()
         return
 
-    # 1. ВИЗНАЧЕННЯ РЕЖИМУ ТА ОЧИЩЕННЯ ТЕКСТУ
-    is_silent_mode = False 
-    final_post_text = text_to_check_filter # Початково: весь текст
-    
-    if text_to_check_filter:
-        first_token = text_to_check_filter.split(maxsplit=1)[0].strip()
-        
-        # ❗ ТИХИЙ РЕЖИМ (Визначення та очищення) ❗
-        if first_token == '#тихо' or first_token == '#save':
-            is_silent_mode = True
-            
-            # Вирізаємо команду з тексту і кладемо в final_post_text
-            parts = text_to_check_filter.split(maxsplit=1)
-            if len(parts) > 1:
-                final_post_text = parts[1].lstrip() 
-                
-                # ❗ ФІКС: ОЧИЩЕННЯ НАЗВИ КНОПКИ (post_title) ❗
-                post_title = final_post_text.split('\n')[0].strip()[:100]
-                
-            else:
-                final_post_text = ""
-                
-            logging.info("Активовано Тихий режим: збереження без розсилки.")
-
-    # 2. ПУБЛІКАЦІЯ В КАНАЛ-АРХІВ (З КОНТРОЛЕМ ТЕКСТУ)
+    # 2. ПУБЛІКАЦІЯ В КАНАЛ-АРХІВ (ПОВЕРНЕННЯ ДО forward_message)
     try:
-        # Визначаємо, чи є вміст тільки текстом, а не іншим content_type
-        is_only_text = callback.message.content_type == 'text' and not callback.message.caption
-        
-        if is_only_text:
-            archive_msg = await bot.send_message(
-                chat_id=ARCHIVE_CHANNEL_ID,
-                text=final_post_text or post_title,
-                parse_mode='Markdown'
-            )
-        else:
-            # ❗ ФІКС МЕДІА: copy_message ДЛЯ ВСІХ МЕДІА ❗
-            archive_msg = await bot.copy_message(
-                chat_id=ARCHIVE_CHANNEL_ID,
-                from_chat_id=chat_id, 
-                message_id=message_id,
-                caption=final_post_text, # <--- ЧИСТИЙ ТЕКСТ (як підпис)
-                parse_mode='Markdown' 
-            )
-
+        # ❗ ВИКОРИСТОВУЄМО forward_message для гарантованого відображення медіа ❗
+        archive_msg = await bot.forward_message(
+            chat_id=ARCHIVE_CHANNEL_ID,
+            from_chat_id=chat_id, 
+            message_id=message_id
+        )
         archive_message_id = archive_msg.message_id
         
     except Exception as e:
@@ -1075,6 +1043,7 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
     # 3. ЗБЕРІГАННЯ В БД
     if folder_id != 0:
         try:
+            # post_title тут чистий (незалежно від вмісту, бо фільтрація не працює)
             await save_post(folder_id, post_title, archive_message_id)
             message_response = f"Пост збережено у папку. "
         except Exception as e:
@@ -1085,16 +1054,18 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
     else:
         message_response = "Пост не буде збережено. "
         
-    # 4. ЗАПУСКАЄМО РОЗСИЛКУ
+    # 4. ЗАПУСКАЄМО РОЗСИЛКУ (Перевірка is_silent_mode)
     if not is_silent_mode:
         await callback.message.edit_text(message_response + "Починаю розсилку...")
+        # ❗ РОЗСИЛКА ТАКОЖ ВИКОРИСТОВУЄ forward_message (через process_broadcast_message)
         await process_broadcast_message(
             content_chat_id=ARCHIVE_CHANNEL_ID,
-            content_message_id=archive_message_id,
+            content_message_id=archive_message_id, # ID з архіву
             message=callback.message,
             broadcast_filter=None
         )
     else:
+        # Відповідь для адміна, якщо активовано Тихий режим
         await callback.message.edit_text("✅ Пост збережено у папку. Розсилка пропущена (Тихий режим).")
         
     # 5. ОЧИЩУЄМО СТАН
@@ -1341,11 +1312,10 @@ async def handle_all_messages(message: Message, state: FSMContext):
 👑 **Адмін-панель** 👑
 
 **Керування Контентом:**
-`/broadcast` - Запустити розсилку та збереження в 'Меню'.
-
-**❗️ РЕЖИМИ РОЗСИЛКИ (ДЛЯ КОМАНДИ /broadcast) ❗️**
-* **📢 Гучний режим (За замовчуванням):** Надішліть пост, починаючи з чистого заголовку. Розсилка піде **ВСІМ**, і пост збережеться.
-* **🤫 Тихий режим (Тільки збереження):** Надішліть пост, починаючи з `#тихо` (наприклад: `#тихо 1. Нова Тема`). Розсилка **пропускається**, пост зберігається.
+* **📢 Гучний режим (Розсилка + Збереження):**
+  Використовуйте команду `/broadcast`. Розсилка піде **ВСІМ**, пост збережеться в 'Меню'.
+* **🤫 Тихий режим (Тільки Збереження):**
+  Використовуйте команду `/savepost`. Пост буде збережено в 'Меню' **БЕЗ розсилки**.
 
 **Додаткові Команди Контенту:**
 `/add_folder [Назва]` - Створити нову папку.
