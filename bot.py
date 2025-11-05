@@ -1116,13 +1116,17 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
 async def show_folder_contents(target: types.Message | types.CallbackQuery, folder_id: int, is_admin: bool = False):
     """Відображає список кнопок (постів) у папці."""
     
+    # Додавання global pool для надійності, хоча функція викликає іншу, що має global pool
+    global pool 
+    
     if not ARCHIVE_CHANNEL_ID:
         msg_target = target.message if isinstance(target, types.CallbackQuery) else target
         await msg_target.answer("❌ **Помилка:** Адміністратор не налаштував `ARCHIVE_CHANNEL_ID` у файлі .env. Перегляд меню неможливий.")
         if isinstance(target, types.CallbackQuery): await target.answer()
         return
         
-    posts = await get_all_posts_by_folder(folder_id)
+    # ❗❗❗ Рядок, що викликав NameError ❗❗❗
+    posts = await get_all_posts_by_folder(folder_id) 
     
     if not posts:
         text = "Ця папка поки порожня."
