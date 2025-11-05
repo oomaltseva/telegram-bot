@@ -575,6 +575,25 @@ async def cmd_menu(message: Message):
         parse_mode='Markdown'
     )
 
+@dp.message(Command("savepost"))
+async def cmd_savepost(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMINS:
+        await message.reply("У вас немає доступу до цієї команди.")
+        return
+    
+    if not ARCHIVE_CHANNEL_ID:
+        await message.answer("❌ **Помилка:** Адміністратор не налаштував `ARCHIVE_CHANNEL_ID` у файлі .env. Збереження неможливе.")
+        return
+        
+    await state.set_state(BroadcastStates.waiting_for_content)
+    # ❗ КЛЮЧОВИЙ ПРАПОРЕЦЬ: Активуємо Тихий режим у FSM
+    await state.update_data(is_silent_mode=True) 
+    await message.answer(
+        "🤫 **ТИХИЙ РЕЖИМ (ТІЛЬКИ ЗБЕРЕЖЕННЯ)**: Будь ласка, надішліть контент.\n\n"
+        "Контент буде збережено в 'Меню' **БЕЗ РОЗСИЛКИ** користувачам.\n\n"
+        "Текст або підпис буде використано як **заголовок** для поста. Або /cancel для відміни."
+    )
+
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: Message, state: FSMContext):
     if message.from_user.id not in ADMINS:
@@ -992,7 +1011,6 @@ async def handle_broadcast_invalid_content(message: Message, state: FSMContext):
     """Обробляє непідтримуваний контент (стікери тощо) у стані розсилки."""
     await message.answer("Непідтримуваний тип контенту (наприклад, стікер або локація). Будь ласка, надішліть текст, фото, відео, документ або опитування. Або /cancel для відміни.")
 
-# bot.py (Повна заміна функції handle_broadcast_folder)
 
 @dp.callback_query(BroadcastStates.waiting_for_folder, F.data.startswith('save_to_folder_'))
 async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
