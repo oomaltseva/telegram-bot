@@ -865,31 +865,45 @@ async def cmd_send_segment(message: Message):
     if message.from_user.id not in ADMINS:
         await message.reply("У вас немає прав адміністратора для цієї команди.")
         return
-    raw_parts = message.text.split()
-    if len(raw_parts) < 3: 
+    
+    # Видаляємо команду і розділяємо решту на токени
+    raw_parts = message.text.split(maxsplit=1)[1].split() if len(message.text.split(maxsplit=1)) > 1 else []
+    
+    if not raw_parts: 
         await message.reply("Будь ласка, вкажіть список ID або номерів телефонів та текст.\nПриклад: /send_segment +380660000000 123456789 Ваш текст.")
         return
+        
     identifiers = []
     text_parts = []
     found_text_start = False
-    for part in raw_parts[1:]:
-        if (part.startswith('+') and part[1:].isdigit() and len(part) > 5) or (part.isdigit()):
-            if not found_text_start:
-                identifiers.append(part)
-            else:
-                text_parts.append(part)
+    
+    for part in raw_parts:
+        # Перевіряємо, чи токен є схожим на ID (число) або телефон (+ та число)
+        is_identifier = (part.startswith('+') and part[1:].isdigit() and len(part) > 5) or (part.isdigit() and len(part) >= 4)
+        
+        if is_identifier and not found_text_start:
+            identifiers.append(part)
         else:
+            # Якщо ми вже знайшли текст, або якщо поточний токен не є ідентифікатором
+            # ВСЕ, що йде далі, є частиною тексту повідомлення.
             found_text_start = True
             text_parts.append(part)
+            
     text_to_send = " ".join(text_parts).strip()
+    
+    # Якщо список ідентифікаторів порожній або немає тексту
     if not identifiers or not text_to_send:
         await message.reply("Не вдалося розпізнати список ідентифікаторів або текст повідомлення. Переконайтесь, що список йде перед текстом.")
         return
+        
     users_data = await get_users_by_list(identifiers)
     target_uids = list(users_data.keys())
+    
+    # ... (решта логіки розсилки, що залишилася без змін) ...
     if not target_uids:
         await message.reply(f"Не знайдено жодного користувача за вказаними {len(identifiers)} ідентифікаторами.")
         return
+    
     await message.answer(f"Починаю цільову розсилку для **{len(target_uids)}** користувачів. Будь ласка, зачекайте.", parse_mode='Markdown')
     sent = 0
     failed = 0
@@ -904,26 +918,31 @@ async def cmd_send_segment(message: Message):
         except Exception as e:
             failed += 1
             logging.error(f"DEBUG: Помилка при відправці користувачу {uid}: {type(e).__name__}.") 
+            
     final_result = f"Цільова розсилка завершена.\nУспіх: {sent}, помилки: {failed}\n"
     if failed > 0:
         final_result += "Зверніть увагу: користувачі, які заблокували бота, залишені у базі даних."
     await message.answer(final_result)
-    
+
 @dp.message(Command("delete_segment"))
 async def cmd_delete_segment(message: Message):
     if message.from_user.id not in ADMINS:
         await message.reply("У вас немає прав адміністратора для цієї команди.")
         return
     
-    raw_parts = message.text.split()
-    if len(raw_parts) < 2: 
+    # Видаляємо команду і розділяємо решту на токени
+    raw_parts = message.text.split(maxsplit=1)[1].split() if len(message.text.split(maxsplit=1)) > 1 else []
+    
+    if not raw_parts: 
         await message.reply("Будь ласка, вкажіть список ID або номерів телефонів для видалення.\nПриклад: /delete_segment +38066... 12345...")
         return
 
     identifiers = []
     
-    for part in raw_parts[1:]:
-        if (part.startswith('+') and part[1:].isdigit() and len(part) > 5) or (part.isdigit()):
+    for part in raw_parts:
+        # Перевіряємо, чи токен є схожим на ID (число) або телефон (+ та число)
+        is_identifier = (part.startswith('+') and part[1:].isdigit() and len(part) > 5) or (part.isdigit() and len(part) >= 4)
+        if is_identifier:
             identifiers.append(part)
 
     if not identifiers:
