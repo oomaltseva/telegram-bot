@@ -327,37 +327,39 @@ async def get_users_by_list(identifiers: list) -> dict:
     global pool
     if not identifiers:
         return {}
+
+    # ❗❗❗ ФІКС: Підготовка ідентифікаторів для коректного пошуку ❗❗❗
+    # Ми шукаємо або за повним ID, або за суфіксом телефону
+    
+    search_terms = []
+    
+    for identifier in identifiers:
+        # 1. Додаємо оригінальний ID/Номер (якщо це повний номер)
+        search_terms.append(identifier) 
+        
+        # 2. Додаємо суфікс (якщо це номер телефону)
+        digits_only = re.sub(r'\D', '', identifier)
+        if len(digits_only) > 5:
+            # Шукаємо за останніми 9-ма цифрами, як у get_user_id_by_phone_strict
+            search_suffix = digits_only[-9:]
+            if search_suffix not in search_terms:
+                search_terms.append('%' + search_suffix) # Додаємо як шаблон пошуку
+        
     async with pool.acquire() as conn:
         results = await conn.fetch(
             """
             SELECT user_id, phone_number, full_name
             FROM users
-            WHERE CAST(user_id AS TEXT) = ANY($1::TEXT[]) OR phone_number = ANY($1::TEXT[])
+            WHERE (CAST(user_id AS TEXT) = ANY($1::TEXT[]) OR phone_number = ANY($1::TEXT[]) OR phone_number LIKE ANY($1::TEXT[]))
             """,
-            identifiers
+            search_terms
         )
+        
     found_users = {}
     for row in results:
         found_users[row['user_id']] = {'phone': row['phone_number'], 'name': row['full_name']}
+        
     return found_users
-
-async def save_post(folder_id: int, post_title: str, message_id: int):
-    global pool
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO posts (folder_id, post_title, message_id) VALUES ($1, $2, $3)",
-            folder_id, post_title, message_id
-        )
-    logging.info(f"Пост (MsgID: {message_id}) збережено у папку ID {folder_id}.")
-
-async def get_all_posts_by_folder(folder_id: int):
-    global pool
-    async with pool.acquire() as conn:
-        posts = await conn.fetch(
-            "SELECT id, post_title, message_id FROM posts WHERE folder_id = $1 ORDER BY created_at ASC",
-            folder_id
-        )
-    return posts 
 
 async def get_folders() -> list:
     global pool
