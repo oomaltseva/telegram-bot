@@ -1113,6 +1113,22 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
 
 # --- ХЕНДЛЕРИ ДЛЯ ПЕРЕГЛЯДУ ПАПОК (НОВА ЛОГІКА) ---
 
+# ❗❗❗ ФІКС NAMEERROR: Потрібно визначити get_all_posts_by_folder, якщо вона не визначена вище ❗❗❗
+# Я включаю її сюди, щоб вона гарантовано була доступна для show_folder_contents.
+# Якщо ця функція вже була визначена у розділі БД, просто видаліть її звідти, 
+# або не вставляйте цей дублікат, але тоді виправте порядок у вашому файлі.
+async def get_all_posts_by_folder(folder_id: int):
+    global pool
+    async with pool.acquire() as conn:
+        posts = await conn.fetch(
+            "SELECT id, post_title, message_id FROM posts WHERE folder_id = $1 ORDER BY created_at ASC",
+            folder_id
+        )
+    return posts 
+# ❗❗❗ КІНЕЦЬ: get_all_posts_by_folder ❗❗❗
+# ----------------------------------------------------------------------------------------------------
+
+
 async def show_folder_contents(target: types.Message | types.CallbackQuery, folder_id: int, is_admin: bool = False):
     """Відображає список кнопок (постів) у папці."""
     
@@ -1125,7 +1141,6 @@ async def show_folder_contents(target: types.Message | types.CallbackQuery, fold
         if isinstance(target, types.CallbackQuery): await target.answer()
         return
         
-    # ❗❗❗ Рядок, що викликав NameError ❗❗❗
     posts = await get_all_posts_by_folder(folder_id) 
     
     if not posts:
@@ -1190,6 +1205,7 @@ async def handle_delete_post_click(callback: CallbackQuery):
     post_id = int(callback.data.split('_')[-1])
     
     try:
+        # ❗ ПЕРЕКОНАЙТЕСЯ, ЩО ВИКЛИКАЄТЬСЯ delete_post_by_id
         success, folder_id = await delete_post_by_id(post_id) 
         
         if success and folder_id:
