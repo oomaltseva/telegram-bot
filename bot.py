@@ -1008,6 +1008,7 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
     folder_id = int(callback.data.split('_')[-1])
     user_data = await state.get_data()
     
+    # ❗❗❗ ВИКОРИСТОВУЄМО ЗМІННІ З FSM ДЛЯ ОРИГІНАЛЬНОГО КОНТЕНТУ ❗❗❗
     chat_id = user_data.get('content_chat_id')
     message_id = user_data.get('content_message_id')
     post_title = user_data.get('post_title')
@@ -1044,10 +1045,9 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
 
     # 2. ПУБЛІКАЦІЯ В КАНАЛ-АРХІВ (З КОНТРОЛЕМ ТЕКСТУ)
     try:
-        # ❗❗❗ ФІКС МЕДІА: Визначаємо, чи є вміст медіа ❗❗❗
+        # ❗ ВИКОРИСТОВУЄМО copy_message/send_message для контролю тексту ❗
         
-        # Якщо контент - ЦЕ ТІЛЬКИ ТЕКСТ (не має інших об'єктів)
-        # Ми перевіряємо, чи є message.content_type ТЕКСТОМ (а не фото, відео, документом)
+        # Якщо контент - ЦЕ ТІЛЬКИ ТЕКСТ (надійний спосіб перевірити)
         if callback.message.content_type == 'text':
             archive_msg = await bot.send_message(
                 chat_id=ARCHIVE_CHANNEL_ID,
@@ -1056,12 +1056,12 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
             )
         # Якщо це медіа (фото, відео, документ, опитування, тощо)
         else:
-            # copy_message працює для всіх медіафайлів і дозволяє змінити caption
+            # ❗ ФІКС: copy_message ДЛЯ ВСІХ МЕДІА (з очищеним підписом) ❗
             archive_msg = await bot.copy_message(
                 chat_id=ARCHIVE_CHANNEL_ID,
-                from_chat_id=chat_id, # ID чату, звідки ми беремо контент
+                from_chat_id=chat_id, 
                 message_id=message_id,
-                caption=final_post_text, # <--- ЧИСТИЙ ТЕКСТ
+                caption=final_post_text, # <--- ТУТ ВИКОРИСТОВУЄМО ЧИСТИЙ ТЕКСТ
                 parse_mode='Markdown' 
             )
 
