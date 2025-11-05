@@ -1045,23 +1045,22 @@ async def handle_broadcast_folder(callback: CallbackQuery, state: FSMContext):
 
     # 2. ПУБЛІКАЦІЯ В КАНАЛ-АРХІВ (З КОНТРОЛЕМ ТЕКСТУ)
     try:
-        # ❗ ВИКОРИСТОВУЄМО copy_message/send_message для контролю тексту ❗
+        # Визначаємо, чи є вміст тільки текстом, а не іншим content_type
+        is_only_text = callback.message.content_type == 'text' and not callback.message.caption
         
-        # Якщо контент - ЦЕ ТІЛЬКИ ТЕКСТ (надійний спосіб перевірити)
-        if callback.message.content_type == 'text':
+        if is_only_text:
             archive_msg = await bot.send_message(
                 chat_id=ARCHIVE_CHANNEL_ID,
                 text=final_post_text or post_title,
                 parse_mode='Markdown'
             )
-        # Якщо це медіа (фото, відео, документ, опитування, тощо)
         else:
-            # ❗ ФІКС: copy_message ДЛЯ ВСІХ МЕДІА (з очищеним підписом) ❗
+            # ❗ ФІКС МЕДІА: copy_message ДЛЯ ВСІХ МЕДІА ❗
             archive_msg = await bot.copy_message(
                 chat_id=ARCHIVE_CHANNEL_ID,
                 from_chat_id=chat_id, 
                 message_id=message_id,
-                caption=final_post_text, # <--- ТУТ ВИКОРИСТОВУЄМО ЧИСТИЙ ТЕКСТ
+                caption=final_post_text, # <--- ЧИСТИЙ ТЕКСТ (як підпис)
                 parse_mode='Markdown' 
             )
 
