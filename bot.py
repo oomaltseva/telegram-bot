@@ -361,6 +361,33 @@ async def get_users_by_list(identifiers: list) -> dict:
         
     return found_users
 
+async def save_post(folder_id: int, post_title: str, message_id: int):
+    """
+    Зберігає інформацію про новий пост в таблицю posts.
+    """
+    global pool
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO posts (folder_id, post_title, message_id) VALUES ($1, $2, $3)",
+            folder_id, post_title, message_id
+        )
+    logging.info(f"Пост (MsgID: {message_id}) збережено у папку ID {folder_id}.")
+
+#
+# ❗❗❗ ФУНКЦІЯ, ЯКА БУЛА ДЛЯ NAMEERROR, ТЕЖ ПОТРІБНА: ❗❗❗
+#
+async def get_all_posts_by_folder(folder_id: int):
+    """
+    Отримує всі пости для заданої папки, сортуючи від старих до нових.
+    """
+    global pool
+    async with pool.acquire() as conn:
+        posts = await conn.fetch(
+            "SELECT id, post_title, message_id FROM posts WHERE folder_id = $1 ORDER BY created_at ASC",
+            folder_id
+        )
+    return posts
+
 async def get_folders() -> list:
     global pool
     async with pool.acquire() as conn:
