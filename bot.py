@@ -607,6 +607,8 @@ async def cmd_broadcast(message: Message, state: FSMContext):
         return
         
     await state.set_state(BroadcastStates.waiting_for_content)
+    # ❗ ФІКС: ЯВНО ВИМИКАЄМО ТИХИЙ РЕЖИМ ❗
+    await state.update_data(is_silent_mode=False)
     await message.answer(
         "Будь ласка, надішліть **будь-який контент** для розсилки (текст, фото, опитування тощо).\n\n"
         "Текст або підпис до медіа буде використано як **заголовок** для цього поста в 'Меню'.\n\n"
